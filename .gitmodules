@@ -1,0 +1,4 @@
+[submodule "Vendor/DirectXCompiler"]
+	path = Vendor/DirectXCompiler
+	url = git@github.com:microsoft/DirectXShaderCompiler.git
+	branch = experimental
