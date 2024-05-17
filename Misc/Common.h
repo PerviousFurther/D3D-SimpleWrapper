@@ -1,89 +1,67 @@
 #pragma once
 
-// Sync utility.
-namespace twen 
+namespace twen
 {
-	struct CriticalSection
-	{
-		CriticalSection() { ::InitializeCriticalSectionAndSpinCount(&CS, 8u); }
-		~CriticalSection() { ::DeleteCriticalSection(&CS); }
-
-		CRITICAL_SECTION CS;
-	};
-
-	struct Event 
-	{
-		Event() :Handle{ ::CreateEventExW(nullptr, nullptr, NULL, EVENT_ALL_ACCESS) } {}
-		~Event() { ::CloseHandle(Handle); }
-
-		void Set() { ::SetEvent(Handle); }
-		void Reset() { ::ResetEvent(Handle); }
-
-		void Wait(DWORD milisecond = INFINITE) const 
-		{
-			WaitForSingleObject(Handle, milisecond);
-		}
-		::HANDLE Handle;
-	};
-	template<typename>
-	struct ScopeLock;
-
-	template<>
-	struct ScopeLock<void>
-	{
-		ScopeLock(Event& event) 
-			: Event{ &event }
-			, Deletion{&ScopeLock::ResetEvent}
-		{ event.Set(); }
-
-		ScopeLock(CriticalSection& cs)
-			: CS{ &cs } 
-			, Deletion{ &ScopeLock::LeaveCS }
-		{ ::EnterCriticalSection(&cs.CS); }
-
-		~ScopeLock() { (this->*Deletion)(); }
-
-		void LeaveCS() { ::LeaveCriticalSection(&CS->CS); }
-		void ResetEvent() { Event->Reset(); }
-
-		void (ScopeLock::* Deletion)();
-		union 
-		{
-			CriticalSection* CS;
-			Event* Event;
-		};
-	};
-
-	template<typename T> struct ComPtr : ::winrt::com_ptr<T> 
+	template<typename T> struct ComPtr
+#if defined(WINRT_BASE_H)
+		: ::winrt::com_ptr<T>
 	{
 		using::winrt::com_ptr<T>::com_ptr;
-		ComPtr(::winrt::com_ptr<T> p) : ::winrt::com_ptr<T>{p} {}
-		FORCEINLINE T* get() const { return::winrt::com_ptr<T>::get(); }
-		FORCEINLINE T* operator*() const { return::winrt::com_ptr<T>::get(); }
-		FORCEINLINE operator T* const() const { return::winrt::com_ptr<T>::get(); }
-		
-		FORCEINLINE T** put() { return::winrt::com_ptr<T>::put(); }
-		FORCEINLINE T** operator&() { return::winrt::com_ptr<T>::put(); }
+		ComPtr(::winrt::com_ptr<T> p) : ::winrt::com_ptr<T>{ p } {}
+		inline T* Get() const { return::winrt::com_ptr<T>::get(); }
+		inline T* operator*() const { return::winrt::com_ptr<T>::get(); }
+		inline operator T* const() const { return::winrt::com_ptr<T>::get(); }
+
+		inline T** Put() { return::winrt::com_ptr<T>::put(); }
+		inline T** operator&() { return::winrt::com_ptr<T>::put(); }
+
+		template<typename P>
+		inline ComPtr<P> As() { return::winrt::com_ptr<T>::template try_as<P>(); }
 	};
+#elif defined(_WRL_IMPLEMENTS_H_)
+		: ::Microsoft::WRL::ComPtr<T>
+	{
+		using::Microsoft::WRL::ComPtr<T>::ComPtr;
+		ComPtr(::Microsoft::WRL::ComPtr<T> p) : ::Microsoft::WRL::ComPtr<T>{ p } {}
+
+		inline T* Get() const { return::Microsoft::WRL::ComPtr<T>::Get(); }
+		inline T* operator*() const { return Get(); }
+
+		inline T** operator&() { return::Microsoft::WRL::ComPtr<T>::ReleaseAndGetAddressOf(); }
+		inline T** Put() { return::Microsoft::WRL::ComPtr<T>::ReleaseAndGetAddressOf(); }
+
+		template<typename P>
+		inline ComPtr<P> As()
+		{
+			::Microsoft::WRL::ComPtr<P> pointer;
+			auto hr = ::Microsoft::WRL::ComPtr<T>::As(&pointer);
+			assert(SUCCEEDED(hr) && "ComPtr as failure.");
+			return pointer;
+		}
+	};
+#else
+		;
+#error Custom ComPtr is not implmented.
+#endif
 }
 
 // Device child.
-namespace twen 
+namespace twen
 {
 	class Device;
-	
-	class DeviceChild 
+
+	class DeviceChild
 	{
 	public:
 		FORCEINLINE DeviceChild(Device& device) : m_Device{ &device } {}
 
-		FORCEINLINE auto& GetDevice() const 
+		FORCEINLINE auto& GetDevice() const
 		{
 			assert(m_Device && "Device cannot be null.");
 			return *m_Device;
 		}
 	private:
-		Device *m_Device;
+		Device* m_Device;
 	};
 }
 
@@ -92,7 +70,7 @@ namespace twen
 {
 	class Device;
 
-	struct NodeMask 
+	struct NodeMask
 	{
 		::UINT Creation;
 		::UINT Visible;
@@ -108,11 +86,11 @@ namespace twen
 		const::UINT NativeMask;
 	};
 
-	struct MultiNodeObject 
+	struct MultiNodeObject
 	{
-		MultiNodeObject(NodeMask nodeMask) 
+		MultiNodeObject(NodeMask nodeMask)
 			: VisibleMask{ nodeMask.Visible }, CreateMask{ nodeMask.Creation } {}
-		MultiNodeObject(::UINT visibleMask, ::UINT createMask) 
+		MultiNodeObject(::UINT visibleMask, ::UINT createMask)
 			: VisibleMask{ visibleMask }, CreateMask{ createMask } {}
 
 		// temporary.
@@ -123,9 +101,9 @@ namespace twen
 	};
 }
 
-namespace twen 
+namespace twen
 {
-	inline constexpr struct 
+	inline constexpr struct
 	{
 		inline static constexpr::UINT GetBitPerPixel(::DXGI_FORMAT format)
 		{
@@ -368,7 +346,7 @@ namespace twen
 			case DXGI_FORMAT_R32_FLOAT:
 				return DXGI_FORMAT_R32_FLOAT;
 
-		#if IS_DEBUG
+#if IS_DEBUG
 			case DXGI_FORMAT_R32G8X24_TYPELESS:
 			case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
 			case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
@@ -381,7 +359,7 @@ namespace twen
 			case DXGI_FORMAT_D16_UNORM:
 				assert(!"Requested a UAV format for a depth stencil format.");
 
-		#endif
+#endif
 			default:
 				// return format.
 				return DXGI_FORMAT_UNKNOWN;
@@ -443,51 +421,269 @@ namespace twen
 		{
 			return static_cast<UINT16>(::std::floor(::std::log2(width > height ? width : height))) + 1;
 		}
+
+
+		inline static::DXGI_FORMAT MakeFormat(::D3D_REGISTER_COMPONENT_TYPE type, ::UINT mask) noexcept
+		{
+#define BUNDLE(type)								\
+switch (mask)										\
+{													\
+case 0x1:return::DXGI_FORMAT_R32_##type;			\
+case 0x3:return::DXGI_FORMAT_R32G32_##type;			\
+case 0x7:return::DXGI_FORMAT_R32G32B32_##type;		\
+case 0xf:return::DXGI_FORMAT_R32G32B32A32_##type;	\
+default:return::DXGI_FORMAT_UNKNOWN;				\
+}
+
+			switch (type)
+			{
+			case::D3D_REGISTER_COMPONENT_UINT32:
+				BUNDLE(UINT);
+			case::D3D_REGISTER_COMPONENT_SINT32:
+				BUNDLE(SINT);
+			case::D3D_REGISTER_COMPONENT_FLOAT32:
+				BUNDLE(FLOAT);
+			default:return::DXGI_FORMAT_UNKNOWN;
+			}
+#undef BUNDLE
+		}
+		inline static::UINT FormatToMask(::DXGI_FORMAT format)
+		{
+#define BUNDLE(type)								\
+case::DXGI_FORMAT_R32_##type:			return 0x1; \
+case::DXGI_FORMAT_R32G32_##type:		return 0x3;	\
+case::DXGI_FORMAT_R32G32B32_##type:		return 0x7; \
+case::DXGI_FORMAT_R32G32B32A32_##type:	return 0xf; 
+			switch (format) {
+				BUNDLE(UINT); BUNDLE(FLOAT); BUNDLE(SINT);
+			default:assert(!"Current format is not allow to make mask."); return 0;
+			}
+#undef BUNDLE
+		}
+
+		inline static constexpr::D3D12_ROOT_PARAMETER_TYPE ShaderInputTypeToRootParameterType(::D3D_SHADER_INPUT_TYPE type) noexcept
+		{
+			switch (type)
+			{
+			case D3D_SIT_CBUFFER:
+			case D3D_SIT_STRUCTURED:// TODO: make sure it is right.
+			case D3D_SIT_BYTEADDRESS:
+				return::D3D12_ROOT_PARAMETER_TYPE_CBV;
+
+			case D3D_SIT_TBUFFER:
+				return::D3D12_ROOT_PARAMETER_TYPE_SRV;
+
+			case D3D_SIT_UAV_RWTYPED:
+			case D3D_SIT_UAV_RWSTRUCTURED:
+			case D3D_SIT_UAV_RWBYTEADDRESS:
+			case D3D_SIT_UAV_APPEND_STRUCTURED:
+			case D3D_SIT_UAV_CONSUME_STRUCTURED:
+			case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER:
+				return::D3D12_ROOT_PARAMETER_TYPE_UAV;
+
+			default:return::D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+			}
+		}
+
+		inline static constexpr::D3D12_RESOURCE_DIMENSION GetDimensionBySRVDimension(::D3D_SRV_DIMENSION dimension)
+		{
+			switch (dimension)
+			{
+			case::D3D12_RESOURCE_DIMENSION_BUFFER:
+				return::D3D12_RESOURCE_DIMENSION_BUFFER;
+
+			case::D3D12_SRV_DIMENSION_TEXTURE1D:
+			case::D3D12_SRV_DIMENSION_TEXTURE1DARRAY:
+				return::D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+
+			case::D3D12_SRV_DIMENSION_TEXTURE2D:
+			case::D3D12_SRV_DIMENSION_TEXTURE2DARRAY:
+			case::D3D12_SRV_DIMENSION_TEXTURE2DMS:
+			case::D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY:
+			case::D3D12_SRV_DIMENSION_TEXTURECUBE:
+			case::D3D12_SRV_DIMENSION_TEXTURECUBEARRAY:
+				return::D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+
+			case::D3D12_SRV_DIMENSION_TEXTURE3D:
+				return::D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+
+			case::D3D_SRV_DIMENSION_UNKNOWN:
+			default:return::D3D12_RESOURCE_DIMENSION_UNKNOWN;
+			}
+		}
+
+		inline static constexpr::D3D12_DESCRIPTOR_RANGE_TYPE ShaderInputTypeToDescriptorRangeType(::D3D_SHADER_INPUT_TYPE type) noexcept
+		{
+			switch (type)
+			{
+			case D3D_SIT_CBUFFER:
+			case D3D_SIT_STRUCTURED:
+			case D3D_SIT_BYTEADDRESS:
+				return::D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+
+			case D3D_SIT_TBUFFER:
+			case D3D_SIT_TEXTURE:
+				return::D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+
+			case D3D_SIT_SAMPLER:
+				return::D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+
+			case D3D_SIT_UAV_RWTYPED:
+			case D3D_SIT_UAV_RWSTRUCTURED:
+			case D3D_SIT_UAV_RWBYTEADDRESS:
+			case D3D_SIT_UAV_APPEND_STRUCTURED:
+			case D3D_SIT_UAV_CONSUME_STRUCTURED:
+			case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER:
+				return::D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+
+			default:
+				return static_cast<::D3D12_DESCRIPTOR_RANGE_TYPE>(0xff);
+			}
+		}
+
+		inline static constexpr::D3D12_DESCRIPTOR_RANGE_TYPE RootTypeToRangeType(::D3D12_ROOT_PARAMETER_TYPE type)
+		{
+			switch (type)
+			{
+			case D3D12_ROOT_PARAMETER_TYPE_CBV:
+				return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+
+			case D3D12_ROOT_PARAMETER_TYPE_SRV:
+				return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+
+			case D3D12_ROOT_PARAMETER_TYPE_UAV:
+				return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+
+			default:return::D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+			}
+		}
+
+		inline static constexpr::D3D12_SHADER_BYTECODE(
+			::D3D12_GRAPHICS_PIPELINE_STATE_DESC::* ShaderTypeToBindPoint(::D3D12_SHADER_VERSION_TYPE type) noexcept)
+		{
+			switch (type)
+			{
+			case D3D12_SHVER_PIXEL_SHADER:		return&::D3D12_GRAPHICS_PIPELINE_STATE_DESC::PS;
+			case D3D12_SHVER_VERTEX_SHADER:		return&::D3D12_GRAPHICS_PIPELINE_STATE_DESC::VS;
+			case D3D12_SHVER_GEOMETRY_SHADER:	return&::D3D12_GRAPHICS_PIPELINE_STATE_DESC::GS;
+			case D3D12_SHVER_HULL_SHADER:		return&::D3D12_GRAPHICS_PIPELINE_STATE_DESC::HS;
+			case D3D12_SHVER_DOMAIN_SHADER:		return&::D3D12_GRAPHICS_PIPELINE_STATE_DESC::DS;
+			default:return nullptr;
+			}
+		}
 	} Utils{};
 
 	template<typename T>
 	struct Pointer;
 
-	struct PointerHasher 
+	template<>
+	struct Pointer<void> {};
+
+	struct PointerHasher
 	{
 		template<typename T>
 		inline::std::size_t operator()(Pointer<T> const& pointer) const
-		{ return::std::hash<::std::size_t>(pointer.Offset); }
+		{
+			return::std::hash<::std::size_t>(pointer.Offset);
+		}
 	};
 }
 
 // Concepts
-namespace twen 
+namespace twen::inner
 {
 	template<typename Derived, typename Base>
-	concept DerviedFrom = 
-		::std::is_base_of_v<Base, Derived> 
-		||::std::is_same_v<Derived, Base>;
+	concept congener =
+		::std::is_base_of_v<Base, Derived>
+		|| ::std::is_same_v<Derived, Base>;
+
+	template<typename T>
+	struct traits;
 }
 
-namespace twen 
+namespace twen
 {
 	template<typename T, typename...NT>
 	struct ShareObject : public::std::enable_shared_from_this<T>
 	{
-		template<DerviedFrom<T> TargetT = T, typename...Args>
+		template<inner::congener<T> TargetT = T, typename...Args>
 		static auto Create(NT...necessaryArgs, Args&&...args)
 			noexcept(::std::is_nothrow_constructible_v<TargetT, NT..., Args...>)
 			requires::std::constructible_from<TargetT, NT..., Args...>
-		{ return::std::make_shared<TargetT>(necessaryArgs..., ::std::forward<Args>(args)...); }
+		{
+			return::std::make_shared<TargetT>(necessaryArgs..., ::std::forward<Args>(args)...);
+		}
+
+		template<inner::congener<T> TargetT>
+		auto As();
 
 		virtual ~ShareObject() = default;
-	
-		inline static::UINT Growing{0u};
-		const::UINT ID{Growing++};
+
+		inline static::UINT Growing{ 0u };
+		const::UINT ID{ Growing++ };
+
+		using base_t = T;
 	};
 }
 
-namespace twen 
+namespace twen
 {
-	struct LinkedObject 
+	struct LinkedObject
 	{
 		LinkedObject* Prev;
 		LinkedObject* Next;
 	};
 }
+
+// Remove in future probably.
+
+//struct CriticalSection
+//{
+//	CriticalSection() { ::InitializeCriticalSectionAndSpinCount(&CS, 8u); }
+//	~CriticalSection() { ::DeleteCriticalSection(&CS); }
+
+//	CRITICAL_SECTION CS;
+//};
+
+//struct Event 
+//{
+//	Event() :Handle{ ::CreateEventExW(nullptr, nullptr, NULL, EVENT_ALL_ACCESS) } {}
+//	~Event() { ::CloseHandle(Handle); }
+
+//	void Set() { ::SetEvent(Handle); }
+//	void Reset() { ::ResetEvent(Handle); }
+
+//	void Wait(DWORD milisecond = INFINITE) const 
+//	{
+//		WaitForSingleObject(Handle, milisecond);
+//	}
+//	::HANDLE Handle;
+//};
+//template<typename>
+//struct ScopeLock;
+
+//template<>
+//struct ScopeLock<void>
+//{
+//	ScopeLock(Event& event) 
+//		: Event{ &event }
+//		, Deletion{&ScopeLock::ResetEvent}
+//	{ event.Set(); }
+
+//	ScopeLock(CriticalSection& cs)
+//		: CS{ &cs } 
+//		, Deletion{ &ScopeLock::LeaveCS }
+//	{ ::EnterCriticalSection(&cs.CS); }
+
+//	~ScopeLock() { (this->*Deletion)(); }
+
+//	void LeaveCS() { ::LeaveCriticalSection(&CS->CS); }
+//	void ResetEvent() { Event->Reset(); }
+
+//	void (ScopeLock::* Deletion)();
+//	union 
+//	{
+//		CriticalSection* CS;
+//		Event* Event;
+//	};
+//};

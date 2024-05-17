@@ -3,62 +3,66 @@
 #include "Resource\Allocator.hpp"
 
 #include "System\Device.h"
+
 #include "Pipeline\Descriptor.h"
 #include "Resource\Buffer.h"
 #include "Resource\ShaderResource.h"
 
+#include "Pipeline\Default.h"
+#include "Pipeline\RootSignature.h"
+#include "Pipeline\Compiler.h"
 #include "Pipeline\Pipeline.h"
 
 #include "Query.h"
 
-//#include "SyncPoint.h"
+#include "Commands.hpp"
 #include "Context.h"
-
-//namespace twen 
-//{
-//	bool Internment::Close(::twen::Queue* queue)
-//	{
-//		ScopeLock _{ CriticalSection };
-//		assert(!"Not implmented.");
-//		queue->Execute();
-//		return true;
-//	}
-//
-//}
 
 namespace twen 
 {
-	//void Context::Wait(::std::shared_ptr<Queue> queue, ::UINT64 value)
-	//{
-	//	
-	//}
-
-	DirectContext::DirectContext(CommandList::Type* listToRecord,
-		::std::shared_ptr<GraphicsPipelineState> pso, ::std::shared_ptr<::twen::RootSignature> rso,
-		::std::shared_ptr<DescriptorSet> rtvSet, ::std::shared_ptr<DescriptorSet> dsvSet, 
-		::std::shared_ptr<DescriptorSet> csuSet, ::std::shared_ptr<DescriptorSet> samplerSet)
-		: Context{ listToRecord, Type }
-		, GraphicsState{ pso }
-		, RTVHandles{ rtvSet->Obtain(pso->RenderTargetCount) }
-		, CSUHandles{ csuSet->Obtain(rso->DescriptorsCount()) }
-		, DSVHandle{ dsvSet->Obtain(1u) }
-		, SamplerHandles{ samplerSet->Obtain(rso->SamplerCount()) }
-		, BindedRootSignature{rso}
+	// TODO: Maybe in future make descriptor set changable.
+	DirectContext::DirectContext(CommandLists::Type* listToRecord, 
+		::std::shared_ptr<GraphicsPipelineState> pso, 
+		::std::vector<::std::shared_ptr<DescriptorSet>> const& sets)
+		: Context{listToRecord, Type}
+		, m_Roots{pso->EmbeddedRootSignature()->m_Roots}
+		, m_StaticSampler{pso->EmbeddedRootSignature()->m_Samplers}
 	{
-		assert(RTVHandles.Capability && CSUHandles.Capability && DSVHandle.Capability && 
-			(rso->SamplerCount() ? SamplerHandles.Capability : true) && "Descriptor set corrupted.");
 		CommandList->SetPipelineState(*pso);
-		::ID3D12DescriptorHeap* heaps[2]{*csuSet, samplerSet ? *samplerSet : nullptr};
-		CommandList->SetDescriptorHeaps(samplerSet ? 2u : 1u, heaps);
-		CommandList->SetGraphicsRootSignature(*rso);
+
+		::ID3D12DescriptorHeap* heaps[2]{};
+		::UINT count{0u};
+
+		for (auto& set : sets) 
+		{
+			switch (set->Type)
+			{
+			case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV:
+			case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:
+				MODEL_ASSERT(count <= 2u, "Too many descriptor heap.");
+				m_Handles.emplace(set->Type, set->Obtain(pso->EmbeddedRootSignature()->Requirement(set->Type)));
+				heaps[count++] = *set;
+				break;
+			case D3D12_DESCRIPTOR_HEAP_TYPE_RTV:
+				m_Handles.emplace(set->Type, set->Obtain(pso->RenderTargetCount));
+				break;
+			case D3D12_DESCRIPTOR_HEAP_TYPE_DSV:
+				if(pso->DepthEnable || pso->StencilEnable) 
+					m_Handles.emplace(set->Type, set->Obtain(1u));
+				break;
+			case D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES:assert(!"Unknown descriptor heap type.");
+			default:break;
+			}
+		}
+		CommandList->SetDescriptorHeaps(count, heaps);
+		CommandList->SetGraphicsRootSignature(*pso->EmbeddedRootSignature());
+
+		LinkPipeline(pso);
 	}
 
 	DirectContext::~DirectContext() 
 	{
-		SamplerHandles.Discard();
-		CSUHandles.Discard();
-		DSVHandle.Discard(); 
-		RTVHandles.Discard(); 
+		for (auto&[_, handle] : m_Handles) handle.Discard();
 	}
 
 	void Context::BeginQuery(Pointer<QuerySet> const& query)
@@ -72,99 +76,94 @@ namespace twen
 		CommandList->ResolveQueryData(*query.BackingSet.lock(), query.Type, query.Offset, query.Capability, **query.OutDestination.lock(), 0u);
 	}
 
-	void DirectContext::Viewport(::D3D12_RECT viewport)
+	void DirectContext::Viewport(::D3D12_RECT scssior)
 	{
-		::D3D12_VIEWPORT viewport_{ 0.0f, 0.0f, 
-			static_cast<::FLOAT>(viewport.right - viewport.left), 
-			static_cast<::FLOAT>(viewport.bottom - viewport.top), 0.0f, 1.0f};
-		CommandList->RSSetViewports(1u, &viewport_);
-		CommandList->RSSetScissorRects(1u, &viewport);
-		ViewPortWasSet = true;
+		::D3D12_VIEWPORT viewport{ 0.0f, 0.0f, 
+			static_cast<::FLOAT>(scssior.right - scssior.left), 
+			static_cast<::FLOAT>(scssior.bottom - scssior.top), 0.0f, 1.0f};
+		CommandList->RSSetViewports(1u, &viewport);
+		CommandList->RSSetScissorRects(1u, &scssior);
 	}
 	void DirectContext::BeginRenderPass(const float rtvClearValue[4], ::D3D12_DEPTH_STENCIL_VALUE dsvClearValue, bool depthc, bool stencilc)
 	{
-		::D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles(RTVHandles);
-		::D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle(DSVHandle);
-		CommandList->OMSetRenderTargets(RTVHandles.Size, &rtvHandles, true, DSVHandle.Size ? &dsvHandle : nullptr);
+		auto& rtvs{m_Handles.at(::D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
+		auto const& dsvs{ m_Handles.contains(::D3D12_DESCRIPTOR_HEAP_TYPE_DSV) ? m_Handles.at(::D3D12_DESCRIPTOR_HEAP_TYPE_DSV) : Pointer<DescriptorSet>{} };
+
+		::D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles(rtvs);
+		::D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle(dsvs);
+		CommandList->OMSetRenderTargets(m_NumRenderTarget, &rtvHandles, true, m_EnableDepth ? &dsvHandle : nullptr);
 		if (rtvClearValue) 
 		{
-			assert(RenderTargetWasSet && "Render target was not set.");
-			for (auto i{ 0u }; i < RTVHandles.Size; i++)
-				CommandList->ClearRenderTargetView(RTVHandles[i], rtvClearValue, 0u, nullptr);
+			for (auto i{ 0u }; i < m_NumRenderTarget; i++)
+				CommandList->ClearRenderTargetView(rtvs[i], rtvClearValue, 0u, nullptr);
 		}
 
-		::D3D12_CLEAR_FLAGS flags{ static_cast<::D3D12_CLEAR_FLAGS>((depthc ? ::D3D12_CLEAR_FLAG_DEPTH : 0u) | (depthc ? ::D3D12_CLEAR_FLAG_STENCIL : 0u )) };
-		if((depthc || stencilc) && DSVHandle.Size) 
-			CommandList->ClearDepthStencilView(DSVHandle, flags, dsvClearValue.Depth, dsvClearValue.Stencil, 0u, nullptr);
+		::D3D12_CLEAR_FLAGS flags{ static_cast<::D3D12_CLEAR_FLAGS>((depthc ? ::D3D12_CLEAR_FLAG_DEPTH : 0u) | (stencilc ? ::D3D12_CLEAR_FLAG_STENCIL : 0u )) };
+
+		if(m_EnableDepth && (depthc || stencilc))
+			CommandList->ClearDepthStencilView(dsvs, flags, dsvClearValue.Depth, dsvClearValue.Stencil, 0u, nullptr);
 	}
-	void DirectContext::BeginDescriptorTable(bool sampler)
-	{
-		assert(!BeginRecordingTable && "Dont worried, filling sampler table behind finished filling other table is ok.");
-
-		if (sampler) TableIndex = SamplerHandles.Size;
-		else TableIndex = CSUHandles.Size;
-		BeginSamplerTable = sampler;
-		BeginRecordingTable = true; // Probably remove this in future.
-	}
-	void DirectContext::EndDescriptorTable(::UINT index, bool sampler) 
-	{
-		if (sampler) CommandList->SetGraphicsRootDescriptorTable(index, SamplerHandles(TableIndex));
-		else CommandList->SetGraphicsRootDescriptorTable(index, CSUHandles(TableIndex));
-
-		BeginSamplerTable = false;
-		BeginRecordingTable = false;
-		TableIndex = 0u;
-	}
-	//void DirectContext::SetRootsignature(::std::shared_ptr<RootSignature> rootsignature) 
-	//{
-
-	//}
-	//void DirectContext::RenderTargetSingle(ComPtr<ID3D12Resource> renderTarget, const float(&rtvClearValue)[4])
-	//{
-	//	::D3D12_CPU_DESCRIPTOR_HANDLE handles[]{RTVHandles};
-	//	CommandList->OMSetRenderTargets(1u, handles, true, nullptr);
-	//	CommandList->ClearRenderTargetView(handles[0], rtvClearValue, 0u, nullptr);
-	//}
-
 	void DirectContext::Draw(::D3D_PRIMITIVE_TOPOLOGY topology, ::UINT count, ::UINT instanceCount)
 	{
-		assert(RenderTargetWasSet && "Render target must be set.");
-		assert(ViewPortWasSet && "Viewport was not set.");
-		assert(!VerticesView.empty() && "Vertex buffer was not set.");
-
 		CommandList->IASetPrimitiveTopology(topology);
-		if (IndicesView.BufferLocation)
-			CommandList->DrawIndexedInstanced(count, instanceCount, 0u, 0u, 0u);
-		else
-			CommandList->DrawInstanced(count, instanceCount, 0u, 0u);
+		CommandList->DrawInstanced(count, instanceCount, 0u, 0u);
 	}
 	void DirectContext::EndRenderPass() 
 	{
 
 	}
-	//void CopyContext::CopyTexture(::std::shared_ptr<TextureCopy> pcopyBuffer) 
-	//{
-	//	auto copyBuffer = *pcopyBuffer;
-	//	assert(!copyBuffer.m_Target.expired() && "Target texture is expired.");
 
-	//	auto texture{ copyBuffer.m_Target.lock() };
-	//	auto resource{ copyBuffer.m_Resource };
-	//	for (auto i{ 0u }; auto const& footprint : texture->GetFootprints(0))
-	//	{
-	//		const::D3D12_TEXTURE_COPY_LOCATION thisCopy{
-	//			*resource, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-	//			{.PlacedFootprint{ footprint }}
-	//		};
-	//		const::D3D12_TEXTURE_COPY_LOCATION otherCopy{
-	//			*texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-	//			{.SubresourceIndex{i++}}
-	//		};
-	//		// TODO: not fit with resolve subresource.
-	//		if (copyBuffer.Access == copyBuffer.AccessWrite)
-	//			CommandList->CopyTextureRegion(&otherCopy, 0u, 0u, 0u, &thisCopy, nullptr);
-	//		else 
-	//			CommandList->CopyTextureRegion(&thisCopy, 0u, 0u, 0u, &otherCopy, nullptr);
-	//	}
-	//}
+	// Dumb method of link pipeline and root signature.
+	// At first we try to bind descriptor table here (because in this place we can know all the linkage between pipeline and root signature).
+	// however it not work.
+	void DirectContext::LinkPipeline(::std::shared_ptr<GraphicsPipelineState> pso)
+	{
+		m_NumRenderTarget = pso->RenderTargetCount;
+		m_EnableDepth = pso->DepthEnable;
 
+		auto const& binds{ pso->m_Bindings };
+		for (auto i{ 0u }; auto& root : m_Roots) 
+		{
+			if (root.Type == ::D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) 
+			{
+				for (auto s{0u}; auto& range : root.Ranges)
+				{
+					unsigned short value{ range };
+					if (binds.contains(value))
+					{
+						auto const& bind{ binds.at(value) };
+
+						auto&& [pair, _]
+						{
+							m_Binds.emplace(bind.Name,
+								Shaders::Input{ &range, bind.Name, bind.Type, 0u, i, s })
+						};
+
+						pair->second.Attach(range);
+
+						s += root.Type == ::D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ? bind.BindCount : 0u;
+					}
+				}
+			} else {
+				unsigned short value{ root.Parameter };
+				if (binds.contains(value)) 
+				{
+					auto const& bind{ binds.at(value) };
+
+					auto&& [pair, _]
+					{
+						m_Binds.emplace(bind.Name,
+							Shaders::Input{ &root.Parameter, bind.Name, bind.Type, 0u, i, 0u })
+					};
+					pair->second.Attach(root.Parameter);
+				}
+			}
+			i++;
+		}
+		//for (auto i{ 0u }; auto & sampler : m_StaticSampler) 
+		//{
+		//	//if()
+		//}
+		assert(!m_Binds.empty() && "No descriptor was bound.");
+	}
 }

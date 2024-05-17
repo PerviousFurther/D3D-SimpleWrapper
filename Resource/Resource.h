@@ -39,7 +39,6 @@ namespace twen
 		Pointer<Resource> AddressOf(::UINT64 offset, ::UINT64 size, Allocator<Resource>& allocator);
 		void DiscardAt(Pointer<Resource> const& pointer);
 
-		//::ID3D12Resource* Get()					  const { return m_Handle.get(); }
 		::D3D12_GPU_VIRTUAL_ADDRESS BaseAddress() const { return m_Handle->GetGPUVirtualAddress(); }
 		::D3D12_RESOURCE_DESC GetDesc()			  const { return m_Handle->GetDesc(); }
 
@@ -49,13 +48,7 @@ namespace twen
 		template<typename Self>
 		::D3D12_HEAP_PROPERTIES HeapProps(this Self&& self, ::D3D12_HEAP_FLAGS* flagsOut = nullptr);
 
-		//bool AllowUpload() const { return m_WriteState & ::D3D12_RESOURCE_STATE_COPY_DEST; }
-		//bool AllowReadback() const { return m_ReadState & ::D3D12_RESOURCE_STATE_COPY_SOURCE; }
-
-		//::D3D12_RESOURCE_STATES ReadState()		const { return m_ReadState; }
-		//::D3D12_RESOURCE_STATES WriteState()	const { return m_WriteState; }
-
-		operator::ID3D12Resource* () const { return m_Handle.get(); }
+		operator::ID3D12Resource* () const { return m_Handle.Get(); }
 	public:
 		const sort_t Type;
 		const::UINT64 Size;
@@ -65,9 +58,6 @@ namespace twen
 			: Size{ GetAllocationSize(desc) }, Alignment{ desc.Alignment }, Type{type}
 		{}
 	protected:
-		//::D3D12_RESOURCE_STATES m_ReadState{::D3D12_RESOURCE_STATE_COMMON};
-		//::D3D12_RESOURCE_STATES m_WriteState{::D3D12_RESOURCE_STATE_COMMON};
-
 		ComPtr<::ID3D12Resource>	m_Handle;
 		::std::map<::UINT64, ::UINT64> m_LockedRange; // TODO: lock a resource.
 	};
@@ -77,7 +67,7 @@ namespace twen
 	{
 	public:
 		CommittedResource(Device& device, ::D3D12_HEAP_TYPE type, ::D3D12_RESOURCE_DESC const& desc,
-			::D3D12_RESOURCE_STATES initState, ::UINT visibleNode = 0u, ::D3D12_HEAP_FLAGS heapFlags = D3D12_HEAP_FLAG_NONE,
+			::D3D12_RESOURCE_STATES initState, ::UINT visibleNode = 0u, ::D3D12_HEAP_FLAGS heapFlags = ::D3D12_HEAP_FLAG_NONE,
 			::D3D12_CLEAR_VALUE const* optimizeValue = nullptr);
 	private:
 		//::std::unordered_set<Pointer<Resource>> m_Sub;
@@ -189,9 +179,27 @@ namespace twen
 	{
 		assert(Resource::GetAllocationSize(desc) > address.Size && "Allocation too small.");
 		device->CreatePlacedResource(*HeapPointer, HeapPointer.Offset,
-			&desc, initState, optimizeValue, IID_PPV_ARGS(m_Handle.put()));
+			&desc, initState, optimizeValue, IID_PPV_ARGS(m_Handle.Put()));
 		assert(m_Handle && "Create placed resource failure.");
 		SET_NAME(m_Handle, ::std::format(L"PlacedResource{}", ID));
+	}
+
+	inline CommittedResource::CommittedResource(Device& device, ::D3D12_HEAP_TYPE type, ::D3D12_RESOURCE_DESC const& desc,
+		::D3D12_RESOURCE_STATES initState, ::UINT visible, ::D3D12_HEAP_FLAGS heapFlags, ::D3D12_CLEAR_VALUE const* optimizeValue)
+		: Resource{ desc, Committed }, MultiNodeObject{ device.NativeMask, visible }
+	{
+		assert(type != ::D3D12_HEAP_TYPE_CUSTOM && "This constructor is not allow custom heap.");
+
+		::D3D12_HEAP_PROPERTIES heapProps{ type, ::D3D12_CPU_PAGE_PROPERTY_UNKNOWN, ::D3D12_MEMORY_POOL_UNKNOWN, device.NativeMask, visible };
+		device->CreateCommittedResource(
+			&heapProps, 
+			heapFlags & ~(::D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES | ::D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES), 
+			&desc, 
+			initState,
+			optimizeValue, 
+			IID_PPV_ARGS(m_Handle.Put()));
+		assert(m_Handle && "Create resource failure.");
+		SET_NAME(m_Handle, ::std::format(L"CommittedResource{}", ID));
 	}
 }
 

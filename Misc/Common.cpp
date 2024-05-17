@@ -4,7 +4,7 @@
 #pragma comment(lib, "dxguid.lib")
 namespace twen::Debug
 {
-	struct Debug
+	struct Debug 
 	{
 		using GetInterfaceT = decltype(DXGIGetDebugInterface);
 
@@ -14,10 +14,10 @@ namespace twen::Debug
 			assert(DllModule && "Debug module loading failure!");
 			assert(GetInterface && "Debug proc cannot find.");
 
-			GetInterface(IID_PPV_ARGS(DebugDXGI.put()));
+			GetInterface(IID_PPV_ARGS(DebugDXGI.Put()));
 			assert(DebugDXGI && "Cannot get debug interface.");
 
-			GetInterface(IID_PPV_ARGS(InfoQueue.put()));
+			GetInterface(IID_PPV_ARGS(InfoQueue.Put()));
 			assert(InfoQueue && "Cannot get debug interface.");
 
 			InfoQueue->SetBreakOnSeverity(DXGI_DEBUG_D3D12, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true);
@@ -96,7 +96,7 @@ namespace twen
 	{
 		void Init(bool mediaEnable = false);
 
-		::IDXGIFactory7* const operator->() const { return Factory.get(); }
+		::IDXGIFactory7* const operator->() const { return Factory.Get(); }
 
 		ComPtr<::IDXGIFactory7> Factory;
 		ComPtr<::IDXGIFactoryMedia> MediaFactory;
@@ -117,7 +117,7 @@ namespace twen
 #else		
 			0
 #endif 
-			, IID_PPV_ARGS(Factory.put()));
+			, IID_PPV_ARGS(Factory.Put()));
 
 		assert(Factory && "Factory initialize failure!");
 		if (mediaEnable) {
@@ -127,7 +127,7 @@ namespace twen
 #else		
 				0
 #endif 
-				, IID_PPV_ARGS(MediaFactory.put()));
+				, IID_PPV_ARGS(MediaFactory.Put()));
 			assert(MediaFactory && "MediaFactory Initialize failure.");
 		}
 		// future.
@@ -145,8 +145,8 @@ namespace twen
 	::std::vector<ComPtr<::IDXGIAdapter4>> const& EnumAdapter()
 	{
 		ComPtr<::IDXGIAdapter1> temp;
-		for (auto i{ 0u }; g_Factory->EnumAdapters1(i, temp.put()) != DXGI_ERROR_NOT_FOUND; ++i)
-			temp.as(IID_PPV_ARGS(g_Factory.Adapters.emplace_back().put()));
+		for (auto i{ 0u }; g_Factory->EnumAdapters1(i, temp.Put()) != DXGI_ERROR_NOT_FOUND; ++i)
+			g_Factory.Adapters.emplace_back(temp.As<::IDXGIAdapter4>());
 
 		return g_Factory.Adapters;
 	}
@@ -155,7 +155,7 @@ namespace twen
 		::DXGI_SWAP_CHAIN_DESC1 const& desc, ::IDXGIOutput* restrictOutput)
 	{
 		ComPtr<::IDXGISwapChain1> result;
-		auto hr = g_Factory->CreateSwapChainForComposition(queue, &desc, restrictOutput, result.put());
+		auto hr = g_Factory->CreateSwapChainForComposition(queue, &desc, restrictOutput, result.Put());
 		if (FAILED(hr)) 
 		{
 	#if D3D12_MODEL_DEBUG
@@ -167,7 +167,7 @@ namespace twen
 	#endif
 		} else {
 
-			return result.as<::IDXGISwapChain4>();
+			return result.As<::IDXGISwapChain4>();
 		}
 	}
 }

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "Resource.h"
+#include "Bindable.hpp"
 
 namespace twen
 {
 	struct DirectContext;
+	struct CopyContext;
 
 	// copy convention.
 	inline namespace method
@@ -27,19 +29,31 @@ namespace twen
 		struct ImageCopy
 		{
 			using ImageSpan = ::std::mdspan<const::std::byte, ::std::dextents<::std::size_t, 2u>>;
-
-			// seems more dumb using span.
-
+			
+		#if _HAS_CXX23
 			// no responiblity for controlling source position.
 			// consume the image is row major.
 			inline constexpr void operator()(MappedDataT dst, ImageSpan img) const
 			{
 				const auto row{ img.extent(1) }, width{ img.extent(0) };
-				const::std::span src{ img.data_handle(), width * row };
-				for (auto i{ 0u }; i < row; i++)
-					::std::ranges::copy(src.subspan(i * width, width), dst.subspan(Offset + RowPitch * i, RowPitch).begin());
+				const::std::span src{ img.data_handle(), row * width };
+				operator()(dst, src, width);
 			}
-			// consume the image is row major.
+		#endif
+
+			inline constexpr void operator()(MappedDataT dst, ::std::span<const::std::byte> src, ::std::uint64_t pitch) const
+			{
+				MODEL_ASSERT(src.size() / pitch >= Rows, "Row too small");
+
+				for (auto i{ 0u }; i < Rows; i++)
+					::std::ranges::copy
+					(
+						src.subspan(i * pitch, pitch), 
+						dst.subspan(Offset + RowPitch * i, RowPitch).begin()
+					);
+			}
+
+			// Assume the image is row major.
 			inline constexpr::std::vector<::std::byte> operator()(const MappedDataT src) const
 			{
 				assert(Width && Rows && "Not allow zero rows or width");
@@ -48,8 +62,10 @@ namespace twen
 				::std::vector<::std::byte> result{ Width * Rows };
 				for (auto i{ 0u }; i < Rows; i++)
 					::std::ranges::copy(src.subspan(Offset + i * RowPitch, Width), result.begin() + i * Width);
+
 				return result;
 			}
+
 			::std::size_t RowPitch; // Stride of each row.
 			::std::size_t Offset;	// Offset from resource base.
 			::std::size_t Rows;		// Image height.
@@ -91,13 +107,12 @@ namespace twen
 			assert(position.Backing.lock()->Type !=::D3D12_HEAP_TYPE_DEFAULT && "Defualt heap cannot be access."); 
 			InitMap();
 		}
-
 	public:
 		const AccessMode Access;
 		// Using struct inside namespace twen::method or expressing lambda to parameter write.
 		// function will be expressed (std::span<std::byte>, provided data).
 		template<typename Fn, typename DT>
-		FORCEINLINE void Write(Fn&& write, DT data)
+		inline void Write(Fn&& write, DT data)
 		{
 			assert(Access & AccessMode::AccessWrite && "Current buffer not allow write.");
 			write(m_Mapped, data);
@@ -106,12 +121,12 @@ namespace twen
 		// Using struct inside namespace twen::method or expressing lambda to parameter read.
 		// function will be expressed {std::span<std::byte>}.
 		template<typename Fn>
-		FORCEINLINE::std::vector<::std::byte> Read(Fn&& read) const
+		inline::std::vector<::std::byte> Read(Fn&& read) const
 		{
 			assert(Access & AccessMode::AccessRead && "Current buffer not allow read.");
 			return read(m_Mapped);
 		}
-		::ID3D12Resource* operator*() const { return *m_Resource; }
+		inline::ID3D12Resource* operator*() const { return *m_Resource; }
 	protected:
 		::std::shared_ptr<Resource>	m_Resource;
 		::std::span<::std::byte>	m_Mapped;
@@ -122,7 +137,8 @@ namespace twen
 			ID3D12Resource* resource = *m_Resource;
 			resource->Map(0, nullptr, (void**)&mapped);
 			assert(mapped && "Resource map failure.");
-			m_Mapped = ::std::span(mapped, m_Resource->Size);
+
+			m_Mapped =::std::span(mapped, m_Resource->Size);
 		}
 	};
 
@@ -133,15 +149,18 @@ namespace twen
 		friend struct CopyContext;
 	public:
 		TextureCopy(::std::shared_ptr<Texture> texture, AccessMode access);
-
+		TextureCopy(Device& device, AccessMode access);
+	public:
 		template<typename ContextT>
 		void Copy(ContextT& copyContext);
-
 		template<typename ContextT>
 		void Copy(ContextT& copy, ::std::shared_ptr<Texture> other, ::UINT subresourceIndex);
-
+#if _HAS_CXX23
 		// Copy single image to sub resource.
 		void Write(ImageCopy::ImageSpan img, ::UINT subresourceIndex = 0u);
+#endif
+		// Copy single image to sub resource.
+		void Write(::std::span<const::std::byte> img, ::UINT rowPitchOfSrc, ::UINT subresourceIndex = 0u);
 	private:
 		::std::weak_ptr<Texture> m_Target;
 	};
@@ -152,7 +171,7 @@ namespace twen
 		ReadbackBuffer(Device& device, ::UINT64 size) 
 			: AccessibleBuffer{ device, size, AccessMode::AccessRead } {}
 
-		void Write(auto&&...) = delete;
+		auto Write(auto...) = delete;
 	};
 	
 	// Vertex buffer.
@@ -174,7 +193,7 @@ namespace twen
 					static_cast<::UINT>(sizeof(::std::ranges::range_value_t<Rngs>))),
 				m_VertexCounts.emplace_back(static_cast<::UINT>(::std::ranges::size(ranges))),
 				// upload to resource.
-				Write(FlatCopy{ accumlate }, ::std::span{ ::std::bit_cast<::std::byte*>(::std::ranges::data(ranges)), m_Views.back().SizeInBytes }),
+				Write(FlatCopy{ accumlate }, ::std::span{ ::std::bit_cast<const::std::byte*>(::std::ranges::data(ranges)), m_Views.back().SizeInBytes }),
 				// offset.
 				accumlate += m_Views.back().SizeInBytes),
 			// end fold expression.
@@ -214,7 +233,7 @@ namespace twen
 		template<::std::integral IntT, ::std::size_t size>
 		void Reupload(::std::span<IntT, size>);
 
-		//FORCEINLINE void Commit(::ID3D12GraphicsCommandList* cmdlist) const
+		//inline  void Commit(::ID3D12GraphicsCommandList* cmdlist) const
 		//{ cmdlist->IASetIndexBuffer(&m_View); }
 
 		void Bind(DirectContext& context) const;
@@ -239,48 +258,62 @@ namespace twen
 		static constexpr auto value = ::DXGI_FORMAT_R8_UINT;
 	};
 
-	inline namespace ConstantBuffers
+	namespace ConstantBuffers
 	{
 		static constexpr auto MinimumAlignment{ D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT };
 	}
+
+	struct DECLSPEC_EMPTY_BASES ConstantBufferView : protected AccessibleBuffer
+	{
+	public:
+		using view_t = ::D3D12_CONSTANT_BUFFER_VIEW_DESC;
+
+		using AccessibleBuffer::AccessibleBuffer;
+
+		static constexpr auto CreateView{ &::ID3D12Device::CreateConstantBufferView };
+		static constexpr auto GraphicsBindRoot{ &::ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView };
+		static constexpr auto ComputeBindRoot{ &::ID3D12GraphicsCommandList::SetComputeRootConstantBufferView };
+
+		::D3D12_GPU_VIRTUAL_ADDRESS Address(::D3D12_CONSTANT_BUFFER_VIEW_DESC const& desc) const { return desc.BufferLocation; } // reserved.
+	};
+
 	// Constant buffer is not a typical accessible buffer, so derived in private.
 	template<typename T>
 	class ConstantBuffer;
+
 	template<>
-	class ConstantBuffer<void> : AccessibleBuffer
+	class ConstantBuffer<void> :
+		public Bindings::Bindable<ConstantBufferView>
 	{
 	public:
 		// Make buffer and reserve for future usage.
 		// @param alignment: constant buffer's alignment
 		ConstantBuffer(Device& device, ::UINT64 reservedSize, ::UINT alignment = ConstantBuffers::MinimumAlignment)
-			: AccessibleBuffer{device, reservedSize, AccessWrite}
+			: Bindable{device, reservedSize, AccessWrite}
 			, Alignment{alignment}
 			, Capability{reservedSize}
-			, m_View{m_Resource->BaseAddress(), static_cast<::UINT>(Capability)}
-		{}
+		{ m_View = { m_Resource->BaseAddress(), static_cast<::UINT>(Capability) }; }
 		// Make whole range the element.
 		// @param alignment: constant buffer's alignment
 		ConstantBuffer(Device& device, Pointer<Heap> const& position, ::UINT alignment)
-			: AccessibleBuffer{device, position, alignment}
+			: Bindable{device, position, alignment}
 			, Alignment{alignment}
 			, Capability{position.Size}
-			, m_View{m_Resource->BaseAddress(), static_cast<::UINT>(Capability)}
-		{}
+		{ m_View = { m_Resource->BaseAddress(), static_cast<::UINT>(Capability) }; }
 	public:
-		void Bind(DirectContext& context, ::UINT index) const;
-
 		template<typename T>
-		FORCEINLINE void Update(T&& element) 
+		inline void Update(T&& element) 
 		{
 			using type =::std::remove_reference_t<T>;
-			assert(sizeof(type) <= Alignment && "Alignment too small.");
 
+			assert(sizeof(type) <= Alignment && "Alignment too small.");
 			assert((m_Filled + Alignment <= Capability ) && "Out of range.");
-			new(m_Mapped.data() + m_Filled)type(::std::forward<type>(element));
+
+			new (m_Mapped.data() + m_Filled) type (::std::forward<type>(element));
 			m_Filled += Alignment;
 		}
 		template<typename T>
-		FORCEINLINE void Update(T&& element, ::UINT index) 
+		inline void Update(T&& element, ::UINT index) 
 		{
 			using type = ::std::remove_reference_t<T>;
 			assert(sizeof(type) <= Alignment && "Alignment mismatch.");
@@ -288,16 +321,17 @@ namespace twen
 			const auto offset = index * Alignment;
 			assert(offset + sizeof(type) <= Capability && "Writing constant buffer out of range.");
 
-			new(m_Mapped.data() + offset)type(::std::forward<type>(element));
+			new (m_Mapped.data() + offset) type (::std::forward<type>(element));
 		}
+
+		void StoreOffset(::UINT64 offset) { m_View.BufferLocation += offset; }
+
 		void Copy(DirectContext& context, ::std::shared_ptr<ConstantBuffer> other);
 	public:
 		const::UINT Alignment;
 		const::UINT64 Capability;
 	protected:
 		::UINT64 m_Filled{0ull};
-
-		::D3D12_CONSTANT_BUFFER_VIEW_DESC m_View;
 	};
 
 	// This only provide some helper function.
@@ -307,28 +341,40 @@ namespace twen
 	{
 	public:
 		using base_t = ConstantBuffer<void>;
-		static_assert(sizeof(T) >= MinimumAlignment, "Size too small. Add padding to make it suitable or use keyword Alignas.");
+		static_assert(sizeof(T) >= ConstantBuffers::MinimumAlignment, "Size too small. Add padding to make it suitable or use keyword Alignas.");
 
 		template<::std::convertible_to<T> PT>
 		ConstantBuffer(Device& device, PT&& element)
-			: ConstantBuffer<void>{ device, sizeof(T),
-			sizeof(T) > MinimumAlignment ? sizeof(T) : MinimumAlignment }
+			: ConstantBuffer<void>
+			{
+				device, 
+				sizeof(T),
+				sizeof(T) > ConstantBuffers::MinimumAlignment 
+					? sizeof(T) 
+					: ConstantBuffers::MinimumAlignment 
+			}
 		{ this->Update(static_cast<T>(::std::forward<PT>(element))); }
 
 		template<::std::convertible_to<T> PT>
 		ConstantBuffer(Device& device, Pointer<Heap> const& position, PT&& element)
-			: ConstantBuffer<void>{ device, sizeof(T),
-			sizeof(T) > MinimumAlignment ? sizeof(T) : MinimumAlignment } {
+			: ConstantBuffer<void>
+			{
+				device, sizeof(T),
+				sizeof(T) > ConstantBuffers::MinimumAlignment 
+					? sizeof(T) 
+					: ConstantBuffers::MinimumAlignment 
+			} 
+		{
 			assert((position.Size % sizeof(T) == 0) && "Size is not aligned or Size too small.");
 			this->Update(static_cast<T>(::std::forward<PT>(element)));
 		}
 
 		template<::std::convertible_to<T> PT>
-		FORCEINLINE void Update(PT&& element)
+		inline void Update(PT&& element)
 		{ base_t::Update(static_cast<T>(::std::forward<PT>(element))); }
 
 		template<::std::convertible_to<T> PT>
-		FORCEINLINE void Update(PT&& element, ::UINT index)
+		inline  void Update(PT&& element, ::UINT index)
 		{ base_t::Update(static_cast<T>(::std::forward<PT>(element)), index); }
 
 	private:

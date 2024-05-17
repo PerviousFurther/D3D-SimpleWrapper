@@ -4,12 +4,12 @@ namespace twen
 {
 	inline constexpr struct
 	{
-		FORCEINLINE::UINT64 Align2(::UINT64 size, ::UINT64 align, bool up) const
+		inline::UINT64 Align2(::UINT64 size, ::UINT64 align, bool up) const
 		{
 			assert(align || (align & (align - 1)) && "Align must be power of 2.");
 			return (size + up * (align - 1u)) & ~(align - 1u);
 		}
-		FORCEINLINE::UINT64 Align(::UINT64 size, ::UINT64 align, bool up) const
+		inline::UINT64 Align(::UINT64 size, ::UINT64 align, bool up) const
 		{
 			return ((size + up * (align - 1u)) / align) * align;
 		}
@@ -34,7 +34,7 @@ namespace twen
 		Pointer<Heap> AddressOf(::UINT offset, ::UINT size, Allocator<Heap>& allocator);
 		void DiscardAt(Pointer<Heap> const& address);
 
-		operator::ID3D12Heap*() const { return m_Heap.get();}
+		operator::ID3D12Heap*() const { return m_Heap.Get();}
 	public:
 		const sort_t	Type;
 		const::UINT64	Size;
@@ -73,15 +73,15 @@ namespace twen
 
 	// inline definition.
 
-	FORCEINLINE Pointer<Heap> Heap::AddressOf(::UINT offset, ::UINT size, Allocator<Heap>& allocator)
+	inline Pointer<Heap> Heap::AddressOf(::UINT offset, ::UINT size, Allocator<Heap>& allocator)
 	{
 		return{ offset, size, Alignment, weak_from_this(), allocator, };
 	}
-	FORCEINLINE void Heap::DiscardAt(Pointer<Heap> const& address)
+	inline void Heap::DiscardAt(Pointer<Heap> const& address)
 	{
 		address.Backing.reset();
 	}
-	FORCEINLINE::ID3D12Heap* Pointer<Heap>::operator*() const
+	inline::ID3D12Heap* Pointer<Heap>::operator*() const
 	{
 		return *Backing.lock(); 
 	}

@@ -106,14 +106,20 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
-      <AdditionalIncludeDirectories>$(ProjectDir)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Vendor\Dxc\Inc;$(ProjectDir)</AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>mpch.h</PrecompiledHeaderFile>
+      <UseStandardPreprocessor>true</UseStandardPreprocessor>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PreBuildEvent>
+      <Command>copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxcompiler.dll" "$(OutDir)“
+copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxc.exe" "$(OutDir)"
+copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxil.dll" "$(OutDir)"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -123,11 +129,12 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Vendor\Dxc\Inc;$(ProjectDir)</AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>mpch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <UseStandardPreprocessor>true</UseStandardPreprocessor>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -135,23 +142,34 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PreBuildEvent>
+      <Command>copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxcompiler.dll" "$(OutDir)“
+copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxc.exe" "$(OutDir)"
+copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxil.dll" "$(OutDir)"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Camera.hpp" />
-    <ClInclude Include="Command\Bundles.h" />
+    <ClInclude Include="Command\Commands.hpp" />
     <ClInclude Include="Command\Context.h" />
     <ClInclude Include="Command\Query.h" />
+    <ClInclude Include="MeshGenerator.hpp" />
+    <ClInclude Include="Misc\Hash.hpp" />
     <ClInclude Include="Misc\ObjectSet.h" />
     <ClInclude Include="Misc\Residency.h" />
     <ClInclude Include="Pipeline\Compiler.h" />
     <ClInclude Include="Pipeline\Default.h" />
     <ClInclude Include="Pipeline\Pipeline.h" />
     <ClInclude Include="Pipeline\RootSignature.h" />
+    <ClInclude Include="Pipeline\Shader.hpp" />
     <ClInclude Include="Resource\Allocator.hpp" />
+    <ClInclude Include="Resource\Bindable.hpp" />
     <ClInclude Include="Resource\Buffer.h" />
     <ClInclude Include="Pipeline\Descriptor.h" />
     <ClInclude Include="Resource\RenderTarget.h" />
+    <ClInclude Include="Resource\Sampler.h" />
     <ClInclude Include="Resource\ShaderResource.h" />
+    <ClInclude Include="Resource\UnorderedAccess.h" />
     <ClInclude Include="System\Adapter.h" />
     <ClInclude Include="System\Device.h" />
     <ClInclude Include="Misc\Debug.h" />
@@ -161,15 +179,11 @@
     <ClInclude Include="Resource\Heap.h" />
     <ClInclude Include="Resource\Resource.h" />
     <ClInclude Include="System\Residency.h" />
-    <ClInclude Include="Vendor\base_4.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Command\Context.cpp" />
     <ClCompile Include="Misc\Common.cpp" />
-    <ClCompile Include="Pipeline\RootSignature.cpp" />
     <ClCompile Include="Resource\Buffer.cpp" />
-    <ClCompile Include="Resource\RenderTarget.cpp" />
-    <ClCompile Include="Resource\ShaderResource.cpp" />
     <ClCompile Include="System\Adapter.cpp" />
     <ClCompile Include="System\Device.cpp" />
     <ClCompile Include="mpch.cpp">
@@ -177,7 +191,6 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="Resource\Heap.cpp" />
-    <ClCompile Include="Resource\Resource.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -21,11 +21,12 @@ namespace twen
 		assert(!(alignment & (alignment - 1)) && "Alignment must be power of 2.");
 		assert(!(size % alignment) && "Size is not aligned.");
 
-		::D3D12_HEAP_DESC desc{
+		::D3D12_HEAP_DESC desc
+		{
 			Size, { type, ::D3D12_CPU_PAGE_PROPERTY_UNKNOWN, ::D3D12_MEMORY_POOL_UNKNOWN, CreateMask, VisibleMask, },
 			static_cast<::UINT>(alignment), flags
 		};
-		GetDevice()->CreateHeap(&desc, IID_PPV_ARGS(m_Heap.put()));
+		device->CreateHeap(&desc, IID_PPV_ARGS(m_Heap.Put()));
 		assert(m_Heap && "Create heap failure.");
 
 		SET_NAME(m_Heap, ::std::format(L"Heap{}", ID));

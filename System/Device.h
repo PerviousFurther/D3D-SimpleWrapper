@@ -9,6 +9,9 @@ namespace twen
 
 	class DescriptorSet;
 	class CommandContextSet;
+	class RootSignatureManager;
+	class ShaderManager;
+	class PipelineManager;
 
 	class Queue : public::std::enable_shared_from_this<Queue>, public DeviceChild
 	{
@@ -27,7 +30,7 @@ namespace twen
 
 		const sort_t Type;
 
-		operator::ID3D12CommandQueue*() const { return m_Handle.get(); }
+		operator::ID3D12CommandQueue*() const { return m_Handle.Get(); }
 	private:
 		::std::vector<::ID3D12CommandList*> m_Payloads;
 
@@ -38,7 +41,7 @@ namespace twen
 		ComPtr<::ID3D12CommandQueue>		m_Handle;
 	};
 	// Dangerous when occurs dead lock.
-	FORCEINLINE void Queue::Wait(::UINT64 value)
+	inline void Queue::Wait(::UINT64 value)
 	{
 		//assert(m_LastTicket && "Queue was never been executed.");
 		if (value)
@@ -56,29 +59,22 @@ namespace twen
 		static inline auto sm_DefualtHeapSize{ 1024 * 1024 * 10u };
 		static constexpr auto FeatureLevel{::D3D_FEATURE_LEVEL_12_0};
 	public:
-		Device(NodeMask node, class Adapter& adapter);
+		Device(class Adapter& adapter);
+		Device();
 
 		Device(Device const&) = delete;
 		Device& operator=(Device const&) = delete;
 
 		~Device();
 	public:
-		::ID3D12Device* operator->() const { return m_Device.get(); }
+		::ID3D12Device* operator->() const { return m_Device.Get(); }
 
-		FORCEINLINE::std::shared_ptr<DescriptorSet> 
+		inline::std::shared_ptr<DescriptorSet> 
 			DescriptorSetOf(::D3D12_DESCRIPTOR_HEAP_TYPE type) const { return m_DescriptorSets.at(type); }
-
-		//auto DescriptorManagerCSU()		const { return m_DescriptorManagers.at(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV); }
-		//auto DescriptorManagerRTV()		const { return m_DescriptorManagers.at(D3D12_DESCRIPTOR_HEAP_TYPE_RTV); }
-		//auto DescriptorManagerDSV()		const { return m_DescriptorManagers.at(D3D12_DESCRIPTOR_HEAP_TYPE_DSV); }
-		//auto DescriptorManagerSampler()	const { return m_DescriptorManagers.at(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER); }
 		
-		FORCEINLINE auto QueueOf(::D3D12_COMMAND_LIST_TYPE type) { return m_MainQueues.at(type); }
+		inline auto QueueOf(::D3D12_COMMAND_LIST_TYPE type) { return m_MainQueues.at(type); }
 
-		//auto QueueCopy() { return m_MainQueues.at(::D3D12_COMMAND_LIST_TYPE_COPY); }
-		//auto QueueDirect() { return m_MainQueues.at(::D3D12_COMMAND_LIST_TYPE_DIRECT); }
-
-		FORCEINLINE::std::shared_ptr<CommandContextSet> 
+		inline::std::shared_ptr<CommandContextSet> 
 			CommandContextSetOf(::D3D12_COMMAND_LIST_TYPE type) const { return m_CommandSets.at(type); }
 
 		template<::D3D12_FEATURE Feature>
@@ -87,20 +83,35 @@ namespace twen
 		template<typename T>
 		bool IsFeatureSupport(T& featurData);
 
+		template<typename T, typename...Args>
+		inline::std::shared_ptr<T> Create(Args&&...args) 
+			requires::std::constructible_from<T, Device&, Args...>
+			|| ::std::constructible_from<T, Args...>
+		{ 
+			if constexpr(::std::constructible_from<T, Device&, Args...>)
+				return T::base_t::template Create<T>(*this, ::std::forward<Args>(args)...); 
+			else 
+				return T::base_t::template Create<T>(::std::forward<Args>(args)...); 
+		}
 		::std::string Message();
+	private:
+		void InitializeDeviceContext();
+		void InitDevice(::IDXGIAdapter* adapter);
 	private:
 		ComPtr<::ID3D12Device> m_Device;
 		
 		::std::unordered_map<::D3D12_HEAP_TYPE, 
 			::std::shared_ptr<Heap>>					m_DefaultHeaps;
+
 		::std::unordered_map<::D3D12_DESCRIPTOR_HEAP_TYPE,
 			::std::shared_ptr<DescriptorSet>>			m_DescriptorSets;
+
 		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, ::std::shared_ptr<Queue>> 
 														m_MainQueues;
+
 		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, ::std::shared_ptr<CommandContextSet>>
 														m_CommandSets;
 
-		//::D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS m_MultiSampleQualityLevels;
 
 	#if D3D12_MODEL_DEBUG
 		ComPtr<::ID3D12InfoQueue> m_InfoQueue;
@@ -128,7 +139,7 @@ namespace twen
 #undef HELPER_DEFINE_
 
 	template<::D3D12_FEATURE Feature>
-	FORCEINLINE auto Device::FeatureData(auto&&...args)
+	inline auto Device::FeatureData(auto&&...args)
 	{
 		using result_t = inner::FeatureEnumToFeatureData<Feature>::type;
 		result_t result{::std::forward<decltype(args)>(args)...};
@@ -137,7 +148,7 @@ namespace twen
 		return result;
 	}
 	template<typename T>
-	FORCEINLINE bool Device::IsFeatureSupport(T& featureData)
+	inline bool Device::IsFeatureSupport(T& featureData)
 	{
 		constexpr auto enum_value = inner::FeatureDataToFeatureEnum<T>::value;
 		return SUCCEEDED(m_Device->CheckFeatureSupport(enum_value, &featureData, sizeof(T)));

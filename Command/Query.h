@@ -36,7 +36,7 @@ namespace twen
 		using argument_t =::D3D12_QUERY_TYPE;
 	public:
 		QuerySet(Device& device, ::D3D12_QUERY_HEAP_TYPE type, ::UINT count);
-		operator interface_t* const () const { return m_Handle.get(); }
+		operator interface_t* const () const { return m_Handle.Get(); }
 	public:
 		const sort_t Type;		// Heap type.
 	private:
@@ -53,7 +53,7 @@ namespace twen
 		assert(count && "Query heap cannot be zero size.");
 
 		::D3D12_QUERY_HEAP_DESC desc{ Type, count, device.NativeMask, };
-		device->CreateQueryHeap(&desc, IID_PPV_ARGS(m_Handle.put()));
+		device->CreateQueryHeap(&desc, IID_PPV_ARGS(m_Handle.Put()));
 
 		assert(m_Handle && "Failed to create query heap.");
 		SET_NAME(m_Handle, ::std::format(L"QueryHeap{}", ID));
