@@ -8,21 +8,22 @@
 	
 	#include <mdspan>
 	#include <ranges>
-	
-	#include <cassert>
-	
-	#if defined(D3D12_MODEL_USE_WINRT)
-		#include <vendor\base_4.h>
-	#else
+	#include <array>
+	#include <queue>
+	#include <mutex>
+	#include <algorithm>
+	#include <list>
+
+	#if !defined(WINRT_BASE_H)
+
 		#include <wrl\implements.h>
-	
+
 		#include <format>
 		#include <string>
 		#include <memory>
 		#include <map>
 		#include <unordered_map>
 		#include <concepts>
-		#include <list>
 		#include <assert.h>
 	#endif
 
@@ -32,9 +33,7 @@
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
-#include <d3d12shader.h>
-
-
+#include <..\Vendor\DXC\inc\d3d12shader.h>
 
 #if defined(_DEBUG) || defined(ENABLE_D3D12_MODEL_DEBUG)
 	#define D3D12_MODEL_DEBUG 1
@@ -50,6 +49,7 @@
 	#else
 		#define MODEL_ASSERT(condition, description) (void)(0)
 	#endif
+	//#define MODEL_VERIFY(condition) 
 #else 
 	#define DECLSPEC_EMPTY_BASES 
 	#define MODEL_ASSERT(condtion, description) assert((condition) && description)
@@ -58,10 +58,24 @@
 #if D3D12_MODEL_DEBUG
 	#include <dxgidebug.h>
 
-	#define DEBUG_OPERATION(x) x
-	#include "Misc\Debug.h"
+	#define DEBUG_OPERATION(...) __VA_ARGS__
 #else
-	#define DEBUG_OPERATION(x) 
+	#define DEBUG_OPERATION(...) 
 #endif 
 
+#if _HAS_CXX23
+	#define EMPTY_IF_CXX23(...)
+	#define PLACE_IF_CXX23(...) __VA_ARGS__
+#else
+	#define EMPTY_IF_CXX23(...) __VA_ARGS__
+	#define PLACE_IF_CXX23(...)
+#endif
+
+#define TWEN_ISCA inline static constexpr auto
+#define TWEN_ISC inline static constexpr
+#define TWEN_IC inline constexpr
+#define TWEN_SCA static constexpr auto
+#define TWEN_ICA inline constexpr auto
+
 #include "Misc\Common.h"
+#include "Misc\Traits.h"

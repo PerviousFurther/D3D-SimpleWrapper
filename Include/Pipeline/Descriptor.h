@@ -1,230 +1,249 @@
 #pragma once
 
-#include "Misc\ObjectSet.h"
+
+namespace twen
+{
+	class DescriptorHeap 
+		: public inner::ShareObject<DescriptorHeap>
+		, public inner::DeviceChild
+		, public inner::MultiNodeObject
+		, public Residency::Resident
+	{
+	public:
+
+		using this_t = DescriptorHeap;
+		using interface_t =::ID3D12DescriptorHeap;
+		using sort_t = ::D3D12_DESCRIPTOR_HEAP_TYPE;
+		using flag_t = ::D3D12_DESCRIPTOR_HEAP_FLAGS;
+		using pointer_t = inner::Pointer<this_t>;
+
+		static constexpr auto NumMaximumSamplerDescriptors{ 2048u };
+		static constexpr auto Alignment{ 1u };
+	public:
+
+		inline DescriptorHeap(Device& device, sort_t type,
+			::UINT numDescriptor, 
+			::D3D12_DESCRIPTOR_HEAP_FLAGS flags = ::D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+			::UINT visible = 0u)
+			: DeviceChild{ device }
+			, MultiNodeObject{ visible, device.NativeMask }
+			, Resident{ resident::DescriptorHeap, numDescriptor * device->GetDescriptorHandleIncrementSize(type), }
+			, Type{ type }
+			, Size{ numDescriptor }
+			, Stride{ device->GetDescriptorHandleIncrementSize(type) }
+			, ShaderVisible( flags &::D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE )
+		{
+			::D3D12_DESCRIPTOR_HEAP_DESC desc{ type, numDescriptor, flags, VisibleMask };
+			device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_Handle));
+
+			MODEL_ASSERT(m_Handle, "Create descriptor heap failure.");
+		}
+
+		DescriptorHeap(DescriptorHeap const&) = delete;
+
+		// Call when residency manager attempt to remove this object.
+		~DescriptorHeap() 
+		{ m_Handle->Release(); }
+
+	public:
+
+		pointer_t Address();
+
+		// Do not call on this method when not On debug Mode.
+		auto DbgCpuAddress() const 
+		{
+		#if D3D12_MODEL_DEBUG
+			return m_Handle->GetCPUDescriptorHandleForHeapStart().ptr;
+		#else
+			return {};
+		#endif
+		}
+
+		// Do not call on this method when not On debug Mode.
+		auto DbgGpuAddress() const 
+		{
+		#if D3D12_MODEL_DEBUG
+			return m_Handle->GetGPUDescriptorHandleForHeapStart().ptr;
+		#else
+			return {};
+		#endif
+		}
+
+		void Evict() const 
+		{ 
+			GetDevice().Evict(this); 
+		}
+
+		operator::ID3D12DescriptorHeap* () const 
+		{
+			GetDevice().UpdateResidency(this);
+			return m_Handle; 
+		}
+	public:
+
+		const sort_t Type;
+		const bool	 ShaderVisible : 1;
+		const::UINT  Size{};
+		const::UINT  Stride{};
+	private:
+		::ID3D12DescriptorHeap* m_Handle;
+	};
+
+}
+
+namespace twen::inner
+{
+	template<>
+	struct inner::Pointer<DescriptorHeap> : PointerBase<DescriptorHeap>
+	{
+		using backing_t = DescriptorHeap;;
+
+		::UINT64 CPUHandle;
+		::UINT64 GPUHandle;
+
+		// Descriptor increment.
+		::UINT64 Alignment;
+
+		void Fallback() const
+		{
+			MODEL_ASSERT(StandAlone() || AllocateFrom, "Not hosting pointer must have an allocator.");
+			if (AllocateFrom)
+				AllocateFrom->Free(*this);
+			else if (StandAlone())
+				Backing.lock()->Evict();
+		}
+
+		inline inner::Pointer<DescriptorHeap> Subrange(::UINT64 offset, ::UINT64 size) const
+		{
+			MODEL_ASSERT(offset + size <= Size, "Out of range.");
+			return
+			{
+				Backing,
+				Offset + offset,
+				size,
+				nullptr,
+				CPUHandle + offset * Alignment,
+				GPUHandle + offset * Alignment,
+				Alignment,
+			};
+		}
+
+		// Check if the pointer is vaild.
+		// Descriptor heap was always being allocated. Thus only verify allocator is ok.
+		inline bool Vaild() const { return AllocateFrom; }
+
+		// obtain base cpu handle.
+		inline operator::D3D12_CPU_DESCRIPTOR_HANDLE() const { return { CPUHandle }; }
+
+		// obtain base gpu handle.
+		inline operator::D3D12_GPU_DESCRIPTOR_HANDLE() const { return { GPUHandle }; }
+
+		inline::D3D12_GPU_DESCRIPTOR_HANDLE operator()(::UINT index) const
+		{
+			MODEL_ASSERT(GPUHandle, "Current gpu handle cannot be access.");
+			MODEL_ASSERT(Size, "Empty block is not allow to access.");
+			MODEL_ASSERT(index < Size, "Access violation on descriptor heap.");
+			return { GPUHandle + index * Alignment };
+		}
+		inline::D3D12_CPU_DESCRIPTOR_HANDLE operator[](::UINT index) const
+		{
+			MODEL_ASSERT(Size, "Empty block is not allow to access.");
+			MODEL_ASSERT(index < Size, "Access violation on descriptor heap.");
+
+			return { CPUHandle + index * Alignment };
+		}
+
+		// Not recommand to call this method.
+		// Not recommand to call this method.
+		bool StandAlone() const { return Backing.lock()->Size == Size; }
+
+		friend bool operator==(inner::Pointer<DescriptorHeap> const& left, inner::Pointer<DescriptorHeap> const& right)
+		{
+			return left.Offset == right.Offset && left.Size == right.Size;
+		}
+	};
+}
 
 namespace twen 
 {
-	class DescriptorSet;
 
-	template<typename T>
-	class ConstantBuffer;
-
-	class ShaderResource;
-	class AccessibleBuffer;
-	class SwapchainBuffer;
-	class DepthStencil;
-	class RenderBuffer;
-
-	namespace Descriptors 
+	inline DescriptorHeap::pointer_t DescriptorHeap::Address()
 	{
-		enum class Type
+		return
 		{
-			Unkown,
-
-			Sampler,
-
-			ConstantBuffer,
-			ShaderResource,
-			UnorderedAccessResource,
-
-			RenderTarget,
-			DepthStencil,
-		};	
+			share::weak_from_this(),
+			0u,
+			this->Size,
+			nullptr,
+			m_Handle->GetCPUDescriptorHandleForHeapStart().ptr,
+			ShaderVisible ? (m_Handle->GetGPUDescriptorHandleForHeapStart().ptr) : 0u,
+			Stride,
+		};
 	}
 
-	template<>
-	struct Pointer<DescriptorSet>
-	{
-		mutable::std::weak_ptr<DescriptorSet> Manager;
-
-		const::UINT64 CPUHandle;
-		const::UINT64 GPUHandle;
-		const::UINT	  Increment;
-		const::UINT	  Offset;
-	
-		mutable::UINT Capability;
-
-		void Discard() const;
-
-		inline bool Vaild() const { return Capability; }
-		// obtain current cpu handle.
-		// obtain base cpu handle.
-		inline operator::D3D12_CPU_DESCRIPTOR_HANDLE() const { return { CPUHandle }; }
-		inline operator::D3D12_GPU_DESCRIPTOR_HANDLE() const { return { GPUHandle }; }
-
-		inline::D3D12_GPU_DESCRIPTOR_HANDLE operator()(::UINT index) const 
-		{
-			assert(GPUHandle && "Current gpu handle cannot be access.");
-			assert(Capability && "Empty block is not allow to access.");
-			assert(index < Capability && "Access violation on descriptor heap.");
-			return { GPUHandle + index * Increment };
-		}
-		inline::D3D12_CPU_DESCRIPTOR_HANDLE operator[](::UINT index) const 
-		{ 
-			assert(Capability && "Empty block is not allow to access.");
-			assert(index < Capability && "Access violation on descriptor heap.");
-
-			return { CPUHandle + index * Increment };
-		}
-	};
-
-	class DescriptorSet : public ShareObject<DescriptorSet>, public DeviceChild, 
-		public SingleNodeObject, public SetManager<DescriptorSet>
-	{
-	public:
-		using sort_t = ::D3D12_DESCRIPTOR_HEAP_TYPE;
-		using pointer_t = Pointer<DescriptorSet>;
-	public:
-		inline DescriptorSet(Device& device, ::D3D12_DESCRIPTOR_HEAP_TYPE type,
-			::UINT numDescriptor, ::D3D12_DESCRIPTOR_HEAP_FLAGS flags = ::D3D12_DESCRIPTOR_HEAP_FLAG_NONE)
-			: DeviceChild{ device }, SingleNodeObject{ device.NativeMask }
-			, SetManager{ numDescriptor }
-			, Type{ type }, Increment{ device->GetDescriptorHandleIncrementSize(type) }
-			, ShaderVisible{ flags == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE }
-		{
-			::D3D12_DESCRIPTOR_HEAP_DESC desc{ type, numDescriptor, flags, NativeMask };
-			device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(m_Handle.Put()));
-
-			SET_NAME(m_Handle, ::std::format(L"DescriptorHeap{}", ID));
-		}
-		~DescriptorSet() = default;
-	public:
-		//void Bind(::ID3D12GraphicsCommandList* commandList, ::std::shared_ptr<DescriptorSet> other) 
-		//{
-		//	assert((Type == ::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || Type ==::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
-		//		&& "This method is use for dynamic descriptor set. But current type is not a dynamic descriptor set.");
-		//	assert((other->Type == ::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || other->Type == ::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
-		//		&& "This method is use for dynamic descriptor set. But current type is not a dynamic descriptor set.");
-		//	assert(other->Type != Type && "The descriptor type have been bind earlier.");
-		//	::ID3D12DescriptorHeap* heaps[]{ m_Handle.Get(), other->m_Handle.Get() };
-		//	commandList->SetDescriptorHeaps(2u, heaps);
-		//}
-		pointer_t AddressOf(::UINT offset, ::UINT count)
-		{
-			assert(count <= NumsElements && "Too big.");
-			return 
-			{	
-				weak_from_this(),
-				//::std::vector<Descriptors::Detail>{count},
-				m_Handle->GetCPUDescriptorHandleForHeapStart().ptr + offset * Increment, 
-				ShaderVisible ? m_Handle->GetGPUDescriptorHandleForHeapStart().ptr + offset * Increment : 0u,
-				Increment, offset, count,
-			};
-		}
-		void DiscardAt(pointer_t const& pointer) const { pointer.Capability = 0u; }
-		operator::ID3D12DescriptorHeap* () const { return m_Handle.Get(); }
-	public:
-		::ID3D12DescriptorHeap* operator*() const { return m_Handle.Get(); }
-	public:
-		const sort_t Type;
-		const::UINT	 Increment;
-		const::UINT	 ShaderVisible : 1;
-		const::std::unordered_set<Descriptors::Type> PermittedType;
-	private:
-		ComPtr<::ID3D12DescriptorHeap> m_Handle;
-	};
-
-	inline void Pointer<DescriptorSet>::Discard() const 
-	{
-		if (Capability) 
-		{
-			assert(!Manager.expired()&&"Owner set was corrupted!");
-			Manager.lock()->Collect(*this);
-		}
-	}
 }
 
-//struct Detail 
-		//{
-		//	Descriptors::Type Type{ Descriptors::Type::Unkown };
-		//	union // weak_ref of binding resource.
-		//	{
-		//		::std::weak_ptr<const AccessibleBuffer> SourceCB;
-		//		::std::weak_ptr<const::twen::ShaderResource> SourceSR;
-		//		struct // UAV
-		//		{
-		//			::std::weak_ptr<const::twen::AccessibleBuffer> SourceUA;
-		//			::std::weak_ptr<const::twen::AccessibleBuffer> Counter;
-		//		};
-		//		::std::weak_ptr<const::twen::RenderBuffer> SourceRT;
-		//		::std::weak_ptr<const::twen::DepthStencil> SourceDS;
-		//	};
-		//	constexpr Detail() : SourceUA{}, Counter{} {}
+namespace twen 
+{
+	struct DescriptorManager
+	{
+		DescriptorManager(Device& device, ::UINT numRtv, ::UINT numDsv, ::UINT numCSU, ::UINT numSampler)
+		{
+			// We dont use staging descriptor heap...
+			// so just an shader visible descriptor heap should be ok.
+	#define TEMPORARY_CREATE(type, num, flag)\
+			if(num) DescriptorHeaps.emplace\
+			(\
+				::D3D12_DESCRIPTOR_HEAP_TYPE_##type, \
+				new inner::DemandAllocator{device.Create<DescriptorHeap>\
+				(\
+					::D3D12_DESCRIPTOR_HEAP_TYPE_##type, \
+					num, \
+					::D3D12_DESCRIPTOR_HEAP_FLAG_##flag, \
+					device.AllVisibleNode()\
+					\
+				)}\
+			)\
 
-		//	Detail(::std::weak_ptr<const ShaderResource> srv)
-		//		: Type{ Descriptors::Type::ShaderResource }
-		//		, SourceSR{ srv } {}
+			TEMPORARY_CREATE(CBV_SRV_UAV, numCSU, SHADER_VISIBLE);
+			TEMPORARY_CREATE(SAMPLER, numSampler, SHADER_VISIBLE);
+			TEMPORARY_CREATE(RTV, numRtv, NONE);
+			TEMPORARY_CREATE(DSV, numDsv, NONE);
+		}
+	#undef TEMPORARY_CREATE
+		~DescriptorManager()
+		{
+			for (auto& [_, allocator] : DescriptorHeaps)
+				delete allocator;
+		}
 
-		//	Detail(::std::weak_ptr<const AccessibleBuffer> cbv)
-		//		: Type{ Descriptors::Type::ShaderResource }
-		//		, SourceCB{ cbv } {}
+		DescriptorManager(DescriptorManager const&) = delete;
+		DescriptorManager& operator=(DescriptorManager const&) = delete;
 
-		//	/*		
-		//	Detail(::std::weak_ptr<const AccessibleBuffer> uav, ::std::weak_ptr<const AccessibleBuffer> counter = {})
-		//		: Type{ Descriptors::Type::UnorderedAccessResource }
-		//		, SourceUA{uav}, Counter{counter} {}
-		//	*/
+		inner::Pointer<DescriptorHeap> GetDescriptors(::D3D12_DESCRIPTOR_HEAP_TYPE type, ::UINT num)
+		{
+			auto& descriptorHeap{ DescriptorHeaps.at(type) };
+			auto pointer = descriptorHeap->Alloc(num);
 
-		//	Detail(::std::weak_ptr<const RenderBuffer> renderBuffer)
-		//		: Type{ Descriptors::Type::RenderTarget }
-		//		, SourceRT{renderBuffer} {}
+			// compare count.
+			MODEL_ASSERT((pointer.CPUHandle - descriptorHeap->Location().CPUHandle) / pointer.Alignment <= descriptorHeap->Location().Size, "Out of range.");
+			MODEL_ASSERT(!((pointer.CPUHandle - descriptorHeap->Location().CPUHandle) % pointer.Alignment), "Not aligned.");
+			MODEL_ASSERT(pointer.Size, "Somthings wrong in descriptor manager.");
 
-		//	Detail(::std::weak_ptr<const DepthStencil> depthStencilBuffer) 
-		//		: Type{Descriptors::Type::DepthStencil}
-		//		, SourceDS{ depthStencilBuffer } {}
-
-		//	void Discard();
-		//	Detail& operator=(Detail const& other);
-		//	~Detail() { Discard(); }
-		//};
-		//inline  void Detail::Discard()
-		//{
-		//	switch (Type)
-		//	{
-		//	case Descriptors::Type::ConstantBuffer:
-		//		SourceCB.reset();
-		//		break;
-		//	case Descriptors::Type::ShaderResource:
-		//		SourceSR.reset();
-		//		break;
-		//	case Descriptors::Type::UnorderedAccessResource:
-		//		SourceUA.reset();
-		//		Counter.reset();
-		//		break;			
-		//	case Descriptors::Type::RenderTarget:
-		//		SourceRT.reset();
-		//		break;
-		//	case Descriptors::Type::DepthStencil:
-		//		SourceDS.reset();
-		//		break;
-		//	default:break;
-		//	}
-		//	Type = Descriptors::Type::Unkown;
-		//}
-		//inline Detail& Detail::operator=(const Detail& other) 
-		//{
-		//	Discard();
-		//	Type = other.Type;
-		//	assert(Type != Descriptors::Type::Unkown&&"Detail cannot be unknown type.");
-		//	switch (Type)
-		//	{
-		//	case Descriptors::Type::ConstantBuffer:
-		//		SourceCB = other.SourceCB;
-		//		break;
-		//	case Descriptors::Type::ShaderResource:
-		//		SourceSR = other.SourceSR;
-		//		break;
-		//	case Descriptors::Type::UnorderedAccessResource:
-		//		SourceUA = other.SourceUA;
-		//		Counter = other.Counter;
-		//		break;
-		//	case Descriptors::Type::RenderTarget:
-		//		SourceRT = other.SourceRT;
-		//		break;
-		//	case Descriptors::Type::DepthStencil:
-		//		SourceDS = other.SourceDS;
-		//		break;
-		//	default:break;
-		//	}
-		//	return *this;
-		//}
+			return pointer;
+		}
+		// TEMPORARY.
+		::std::array<::ID3D12DescriptorHeap*, 2> GetHeaps() const 
+		{ 
+			return 
+			{ 
+				*DescriptorHeaps.at(::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)->Resource(),
+				*DescriptorHeaps.at(::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)->Resource(),
+			};
+		}
+	private:
+		::std::unordered_map<
+			::D3D12_DESCRIPTOR_HEAP_TYPE,
+			inner::Allocator<DescriptorHeap>* > DescriptorHeaps;
+	};
+}

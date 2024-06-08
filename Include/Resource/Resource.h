@@ -1,303 +1,436 @@
 #pragma once
 
-#include "Allocator.hpp"
-
 #include "Heap.h"
 
-namespace twen 
+namespace twen::Utils 
 {
-	class Resource;
-
-	using MappedDataT = ::std::span<::std::byte>;
-
-	template<>
-	struct Pointer<Resource> 
+	inline auto SubresourceIndex(::std::vector<::D3D12_PLACED_SUBRESOURCE_FOOTPRINT> const& resource, ::UINT64 offset, ::UINT64 size)
 	{
-		const::UINT64 Size;
-		const::UINT64 Offset;
+		using footprint_t = D3D12_PLACED_SUBRESOURCE_FOOTPRINT;
 
-		mutable::std::weak_ptr<Resource> Resource;
+		// resource is same, thus project the footprint by offset.
+		auto proj
+		{
+			[](footprint_t const& foot)
+			{
+				return foot.Offset;
+			}
+		};
+		// find left and right boundary.
+		auto left = ::std::ranges::lower_bound(resource, offset, {}, proj);
+		auto right = ::std::ranges::upper_bound(resource, offset + size, {}, proj);
 
-		const::D3D12_GPU_VIRTUAL_ADDRESS Address;
+		struct
+		{
+			::UINT Index;
+			::UINT Count;
+		}
+		result{ static_cast<::UINT>(left - resource.begin()), static_cast<::UINT>(right - left) };
+		return result;
+	}
+}
 
-		Allocator<::twen::Resource>& Allocator;
-
-		operator bool() const { return !Resource.expired(); }
-	};
-
+namespace twen
+{
 	// Resource would not actually create d3d12 resource. 
 	// Use Resource::Create<[Placed/Reserved/Committed]Resource> to generate d3d12 resource.
-	class DECLSPEC_NOVTABLE Resource : public ShareObject<Resource>
+	class Resource 
+		: public inner::ShareObject<Resource>
+		, inner::DeviceChild
+		, public inner::MultiNodeObject
+		, public Residency::Resident
 	{
-		friend struct Context;
 	public:
-		static::UINT64 GetAllocationSize(::D3D12_RESOURCE_DESC const& desc);
-		static::D3D12_RANGE FootprintToRange(::std::vector<::D3D12_PLACED_SUBRESOURCE_FOOTPRINT> const& footprints);
-	public:
+
 		enum sort_t { Committed, Placed, Reserved };
 
-		Pointer<Resource> AddressOf(::UINT64 offset, ::UINT64 size, Allocator<Resource>& allocator);
-		void DiscardAt(Pointer<Resource> const& pointer);
+		using this_t            = Resource;
+		using interface_t       = ::ID3D12Resource;
+		using interface_pointer = interface_t*;
+		using pointer_t         = inner::Pointer<this_t>;
+		using footprint_t       =::D3D12_PLACED_SUBRESOURCE_FOOTPRINT;
+		using desc_t            =::D3D12_RESOURCE_DESC;
 
-		::D3D12_GPU_VIRTUAL_ADDRESS BaseAddress() const { return m_Handle->GetGPUVirtualAddress(); }
-		::D3D12_RESOURCE_DESC GetDesc()			  const { return m_Handle->GetDesc(); }
-
-		bool IsRangeLocked(::D3D12_RANGE range) const;
-		void LockRange(::D3D12_RANGE range) { m_LockedRange.emplace(range.Begin, range.End); }
-
-		template<typename Self>
-		::D3D12_HEAP_PROPERTIES HeapProps(this Self&& self, ::D3D12_HEAP_FLAGS* flagsOut = nullptr);
-
-		operator::ID3D12Resource* () const { return m_Handle.Get(); }
 	public:
+
+		Resource(Resource const&) = delete;
+
+	protected:
+
+		Resource(Device& device, ::D3D12_RESOURCE_DESC const& desc, sort_t type, ::UINT visibleMask, bool isInitEvict)
+			: Resident{ resident::Resource, 0u, isInitEvict }
+			, DeviceChild{ device }
+			, MultiNodeObject{ visibleMask, device.NativeMask }
+			, Type{ type }
+			, Desc{desc}
+		{
+			m_Footprints.resize(Utils::SubResourceCount(desc));
+			device->GetCopyableFootprints(&desc, 0u, static_cast<::UINT>(m_Footprints.size()), 0u, m_Footprints.data(), nullptr, nullptr, &Size);
+		}
+
+		~Resource();
+	public:
+
+		::D3D12_GPU_VIRTUAL_ADDRESS BaseAddress() const 
+		{ 
+			MODEL_ASSERT(Desc.Dimension == ::D3D12_RESOURCE_DIMENSION_BUFFER, "Only buffer allow get address.");
+			return m_Handle->GetGPUVirtualAddress(); 
+		}
+
+	public:
+		// Call only the resource ** IS ** buffer.
+		// Obtain subrange in [offset, offset + size).
+		inner::Pointer<Resource> Address();
+
+		// Device - ResidencyManager.
+		void Evict() 
+		{
+			GetDevice().Evict(this);
+		}
+
+		// Call only the resource ** is NOT ** buffer.
+		// obtain subresource range in [index, index + count).
+		inner::Pointer<Resource> SubresourceOf(::UINT index, ::UINT count);
+
+		// @param index: subresource index.
+		footprint_t const& Footprints(::UINT index) const
+		{ MODEL_ASSERT(m_Footprints.size() > index, "Out of range."); return m_Footprints.at(index); }
+
+		auto Footprints() const
+		{ return ::std::span{ m_Footprints.begin(), m_Footprints.end()}; }
+
+		// DEBUG ONLY: memcmp the resource location with specified range.
+		// *** Only for upload/readback buffer ***	
+		void VerifyResourceLocation(inner::Pointer<Resource> const& location, ::std::span<::std::byte> bytes);
+		// DEBUG ONLY: memcmp the resource location with specified range.
+		// *** Only for upload/readback buffer ***	
+		void VerifyResourceLocation(::D3D12_GPU_VIRTUAL_ADDRESS address, ::std::span<::std::byte> bytes);
+
+		void UnMap(::std::span<::std::byte>) 
+		{
+			m_Handle->Unmap(0u, nullptr);
+
+			m_MapCount--;
+		}
+		::std::span<::std::byte> Map(::UINT64 offset, ::UINT64 size) 
+		{
+			void* data;
+			m_Handle->Map(0u, nullptr, &data);
+
+			MODEL_ASSERT(data, "Should not map on this resource.");
+
+			m_MapCount++;
+			return{ ::std::bit_cast<::std::byte*>(data) + offset, size };
+		}
+
+		operator::ID3D12Resource* () const;
+
+	public:
+
 		const sort_t Type;
-		const::UINT64 Size;
-		const::UINT64 Alignment;
+		const::D3D12_RESOURCE_DESC Desc;
+
 	protected:
-		Resource(::D3D12_RESOURCE_DESC const& desc, sort_t type)
-			: Size{ GetAllocationSize(desc) }, Alignment{ desc.Alignment }, Type{type}
-		{}
-	protected:
-		ComPtr<::ID3D12Resource>	m_Handle;
-		::std::map<::UINT64, ::UINT64> m_LockedRange; // TODO: lock a resource.
+
+	#ifdef D3D12_MODEL_DEBUG
+		::std::wstring m_DebugName;
+	#endif // D3D12_MODEL_DEBUG
+		// Footprints help copy operation.
+		::std::vector<footprint_t> m_Footprints;
+		::UINT m_MapCount{ 0u };
+		::ID3D12Resource* m_Handle;
 	};
 
 	// Committed resource.
-	class DECLSPEC_EMPTY_BASES CommittedResource : public Resource, public MultiNodeObject
+	class CommittedResource final : public Resource
 	{
 	public:
 		CommittedResource(Device& device, ::D3D12_HEAP_TYPE type, ::D3D12_RESOURCE_DESC const& desc,
-			::D3D12_RESOURCE_STATES initState, ::UINT visibleNode = 0u, ::D3D12_HEAP_FLAGS heapFlags = ::D3D12_HEAP_FLAG_NONE,
-			::D3D12_CLEAR_VALUE const* optimizeValue = nullptr);
-	private:
-		//::std::unordered_set<Pointer<Resource>> m_Sub;
+			::D3D12_RESOURCE_STATES initState, ::UINT visibleNode, ::D3D12_HEAP_FLAGS heapFlags,
+			::D3D12_CLEAR_VALUE const& optimizeValue = {});
 	};
 
 	// Placed resource.
-	class PlacedResource : public Resource
+	class PlacedResource final : public Resource
 	{
 	public:
 		static constexpr Resource::sort_t Type{Placed};
 	public:
-		// Not recommanded.
-		template<template<typename>typename AllocatorT>
-		PlacedResource(Device& device, AllocatorT<Heap>& address, ::D3D12_RESOURCE_DESC const& desc,
-			::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE* optimizeValue = nullptr);
+		PlacedResource(Device& device, inner::Pointer<Heap> const& address, ::D3D12_RESOURCE_DESC const& desc,
+			::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE const& optimizeValue = {});
 
-		PlacedResource(Device& device, Pointer<Heap> const& address, ::D3D12_RESOURCE_DESC const& desc,
-			::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE* optimizeValue = nullptr);
-
-		~PlacedResource() override = default;
+		~PlacedResource()
+		{
+			BackingPosition.Fallback();
+		}
 	public:
-		::std::shared_ptr<Heap> ShareHeap() const { return m_BackingHeap; }
-		Heap& BorrowHeap()					const { return *m_BackingHeap; }
-
-		const Pointer<Heap>	HeapPointer;
-	private:
-		const::std::shared_ptr<Heap> m_BackingHeap;
+		const inner::Pointer<Heap> BackingPosition;
 	};
 
 	// Reserved resource is not finished.
-	class ReservedResource : public DeviceChild
+	class ReservedResource final
 	{
 	public:
-		ReservedResource(Device& device, ::std::vector<::std::shared_ptr<Heap>> const& aliasHeaps);
-	private:
-		::std::vector<::std::weak_ptr<Heap>> m_AliasHeaps;
-		::std::vector<::D3D12_RANGE> m_Ranges;
 	};
 
-	// Reserved resource cannot be suballocate.
-	template<> struct Allocator<ReservedResource> { Allocator(auto&&...) = delete; };
+	template<> struct inner::Allocator<ReservedResource> {};
+	template<> struct inner::Allocator<PlacedResource> {};
+	template<> struct inner::Allocator<CommittedResource> {};
 }
 
-// inline 
+namespace twen::inner
+{
+	// Do not const_cast on this.
+	template<>
+	struct inner::Pointer<Resource>
+	{
+		::std::weak_ptr<Resource> Backing;
+
+		::D3D12_GPU_VIRTUAL_ADDRESS Address;
+
+		union
+		{
+
+#pragma warning(disable: 4201)
+
+			struct // For buffer.
+			{
+				::UINT64 Size;
+				::UINT64 Offset;
+			};
+
+			struct // For texture.
+			{
+				::UINT SubresourceIndex;
+				::UINT NumSubresource;
+				::UINT16 ArrayIndex;
+				::UINT16 MipLevels;
+			};
+
+#pragma warning(default: 4201)
+		};
+
+		inner::Allocator<Resource>* AllocateFrom;
+
+		void Fallback() const 
+		{
+			if (AllocateFrom)
+				AllocateFrom->Free(*this);
+			else if (StandAlone())
+				Backing.lock()->Evict();
+			else
+				MODEL_ASSERT(false, "Neither the pointer is allocated nor represent resource itself.");
+		}
+
+		inline inner::Pointer<Resource> Subrange(::UINT64 offset, ::UINT64 size) const
+		{
+			MODEL_ASSERT(Address, "Subrange an texture make no sense.");
+			MODEL_ASSERT(offset + size <= Size, "Out of range.");
+			return
+			{
+			Backing,
+			Address + offset,
+			{
+				size,
+				Offset + offset,
+			}
+			};
+		}
+
+		inline inner::Pointer<Resource> Subresource(::UINT index, ::UINT num) const
+		{
+			MODEL_ASSERT(false, "Not implemented or wont implement.");
+			MODEL_ASSERT(!Address, "Buffer wont have subresource.");
+			MODEL_ASSERT(index + num <= NumSubresource, "Out of range.");
+			return
+			{
+				/*.Backing{Backing},
+				.Address{0u},
+				.SubresourceIndex{SubresourceIndex + index},
+				.NumSubresource{num},
+				.MipLevels{MipLevels},*/
+			};
+		}
+
+		bool IsBufferPointer() const { return Address; }
+
+		bool StandAlone() const
+		{
+			if (Address) 
+			{
+				MODEL_ASSERT(!Backing.expired(), "Cannot delete on dead resource.");
+				return Backing.lock()->Size == Size;
+			}
+			else
+				return Backing.lock()->Footprints().size() == NumSubresource;
+		}
+
+		::D3D12_GPU_VIRTUAL_ADDRESS operator*() const { MODEL_ASSERT(Address, "Not allow dereference an texture pointer to get virtual address."); return Address; }
+
+		operator bool() const { return Backing.use_count(); }
+
+	};
+
+	template<>
+	inline bool operator==<Resource>(inner::Pointer<Resource> const& left, inner::Pointer<Resource> const& right)
+	{
+		return left.Backing.lock().get() == right.Backing.lock().get() &&
+			// verify resource position.
+			(right.Address == left.Address
+				? left.Address
+				// if buffer.
+				  ? left.Offset == right.Offset && right.Size == left.Size
+				  // if texture.
+				  : left.SubresourceIndex == right.SubresourceIndex && right.NumSubresource == left.NumSubresource
+				: false);
+	}
+}
+
+// Definition
+
 namespace twen 
 {
-	// resources inline definition.
-
 	// resource.
 
-	inline::UINT64 Resource::GetAllocationSize(::D3D12_RESOURCE_DESC const& desc)
+	inline PlacedResource::PlacedResource(Device& device, ::twen::inner::Pointer<Heap> const& address, 
+		::D3D12_RESOURCE_DESC const& desc, ::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE const& optimizeValue)
+		: Resource{device, desc, Placed, address.Backing.lock()->VisibleMask, address.Backing.lock()->Evicted }
+		, BackingPosition{address}
 	{
-		if (desc.Dimension == ::D3D12_RESOURCE_DIMENSION_BUFFER) return desc.Width;
+	#if D3D12_MODEL_DEBUG
+		::UINT64 size;
+		device->GetCopyableFootprints(&desc, 0u, 1u, 0u, nullptr, nullptr, nullptr, &size);
+		MODEL_ASSERT(size <= address.Size, "Allocation too small.");
+		MODEL_ASSERT(!(address.Offset & (address.Alignment - 1u)), "Must aligned by alignment.");
+		MODEL_ASSERT(desc.Flags & ::D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE ?
+			desc.Flags & ::D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL : true,
+			"Deny shader resource can only use with depth stencil.");
+	#endif // 
 
-		assert(desc.Format != ::DXGI_FORMAT_UNKNOWN && "Texture not allow unknown format.");
-		auto singleSize =
-			desc.Width * (desc.Format != ::DXGI_FORMAT_UNKNOWN ? Utils.GetBitPerPixel(desc.Format) >> 3 : 1)
-			* desc.Height
-			* desc.DepthOrArraySize;
-		return Align.Align((singleSize + singleSize / 3) * desc.SampleDesc.Count, desc.Alignment, true);
-	}
-	inline ::D3D12_RANGE Resource::FootprintToRange(::std::vector<::D3D12_PLACED_SUBRESOURCE_FOOTPRINT> const& footprints)
-	{
-		// We assume footprints is contingous fragment.
-		auto& back = footprints.back();
-		return { footprints.front().Offset, back.Offset + back.Footprint.RowPitch * back.Footprint.Height * back.Footprint.Depth };
-	}
-	template<typename Self>
-	inline::D3D12_HEAP_PROPERTIES Resource::HeapProps(this Self&& self, ::D3D12_HEAP_FLAGS* flagsOut)
-	{
-		static_assert(!::std::is_same_v<::std::decay_t<Self>, ReservedResource>, "Reserved resource is not allow to get heap props.");
+		device->CreatePlacedResource(
+			*BackingPosition, 
+			BackingPosition.Offset,
+			&desc, initState, 
+			optimizeValue.Format==::DXGI_FORMAT_UNKNOWN ? nullptr : &optimizeValue
+			, IID_PPV_ARGS(&m_Handle));
 
-		::D3D12_HEAP_PROPERTIES heapProps;
-		m_Handle->GetHeapProperties(&heapProps, flagsOut);
-		return heapProps;
-	}
-	inline bool Resource::IsRangeLocked(::D3D12_RANGE range) const
-	{
-		assert(range.Begin < range.End && "Invaild range.");
-		assert(range.End <= Size && "Out of range.");
-
-		auto it = m_LockedRange.lower_bound(range.Begin);
-		if(it != m_LockedRange.end() && it->second > range.Begin) return true;
-
-		it = m_LockedRange.upper_bound(range.End);
-		if (it != m_LockedRange.end() && it->first < range.End) return true;
-
-		return false;
-	}
-	FORCEINLINE Pointer<Resource> Resource::AddressOf(::UINT64 offset, ::UINT64 size, Allocator<Resource>& allocator)
-	{
-		return { size, offset, weak_from_this(), BaseAddress() + offset, allocator };
-	}
-
-	FORCEINLINE void Resource::DiscardAt(Pointer<Resource> const& pointer)
-	{
-		pointer.Resource.reset();
-	}
-
-	template<template<typename>typename AllocatorT>
-	inline PlacedResource::PlacedResource(Device& device, AllocatorT<Heap>& allocator,
-		::D3D12_RESOURCE_DESC const& desc, ::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE* optimizeValue)
-		: PlacedResource{device, allocator.Alloc(Resource::GetAllocationSize(desc)), desc, initState, optimizeValue} {}
-
-	inline PlacedResource::PlacedResource(Device& device, ::twen::Pointer<Heap> const& address, 
-		::D3D12_RESOURCE_DESC const& desc, ::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE* optimizeValue)
-		: Resource{desc, Placed}, m_BackingHeap{ address.Backing }
-		, HeapPointer{address}
-	{
-		assert(Resource::GetAllocationSize(desc) > address.Size && "Allocation too small.");
-		device->CreatePlacedResource(*HeapPointer, HeapPointer.Offset,
-			&desc, initState, optimizeValue, IID_PPV_ARGS(m_Handle.Put()));
-		assert(m_Handle && "Create placed resource failure.");
-		SET_NAME(m_Handle, ::std::format(L"PlacedResource{}", ID));
+		MODEL_ASSERT(m_Handle, "Create placed resource failure.");
+	#if D3D12_MODEL_DEBUG
+		m_DebugName = std::format(L"Resource_{}{}", Debug::Name(), ID);
+		m_Handle->SetName(m_DebugName.data());
+	#endif
 	}
 
 	inline CommittedResource::CommittedResource(Device& device, ::D3D12_HEAP_TYPE type, ::D3D12_RESOURCE_DESC const& desc,
-		::D3D12_RESOURCE_STATES initState, ::UINT visible, ::D3D12_HEAP_FLAGS heapFlags, ::D3D12_CLEAR_VALUE const* optimizeValue)
-		: Resource{ desc, Committed }, MultiNodeObject{ device.NativeMask, visible }
+		::D3D12_RESOURCE_STATES initState, ::UINT visible, ::D3D12_HEAP_FLAGS heapFlags, ::D3D12_CLEAR_VALUE const& optimizeValue)
+		: Resource{ device, desc, Committed, visible, static_cast<bool>(heapFlags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT) }
 	{
-		assert(type != ::D3D12_HEAP_TYPE_CUSTOM && "This constructor is not allow custom heap.");
+		MODEL_ASSERT(type != ::D3D12_HEAP_TYPE_CUSTOM, "This constructor is not allow custom heap.");
 
-		::D3D12_HEAP_PROPERTIES heapProps{ type, ::D3D12_CPU_PAGE_PROPERTY_UNKNOWN, ::D3D12_MEMORY_POOL_UNKNOWN, device.NativeMask, visible };
+		MODEL_ASSERT(desc.Flags & ::D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE ? 
+			desc.Flags & ::D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL : true, 
+			"Deny shader resource can only use with depth stencil.");
+
+		::D3D12_HEAP_PROPERTIES heapProps
+		{ 
+		  type
+		, ::D3D12_CPU_PAGE_PROPERTY_UNKNOWN
+		, ::D3D12_MEMORY_POOL_UNKNOWN
+		, CreateMask
+		, VisibleMask 
+		};
+
 		device->CreateCommittedResource(
 			&heapProps, 
+			// Committed resource cannot set these flags.
 			heapFlags & ~(::D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES | ::D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES), 
 			&desc, 
 			initState,
-			optimizeValue, 
-			IID_PPV_ARGS(m_Handle.Put()));
-		assert(m_Handle && "Create resource failure.");
-		SET_NAME(m_Handle, ::std::format(L"CommittedResource{}", ID));
+			optimizeValue.Format == ::DXGI_FORMAT_UNKNOWN ? nullptr : &optimizeValue,
+			IID_PPV_ARGS(&m_Handle));
+		MODEL_ASSERT(m_Handle, "Create resource failure.");
+	#if D3D12_MODEL_DEBUG
+		m_DebugName = std::format(L"Resource_{}{}", Debug::Name(), ID);
+		m_Handle->SetName(m_DebugName.data());
+	#endif
 	}
-}
 
-// utils help build resource desc.
-namespace twen 
-{
-	inline constexpr struct
+	inline Resource::~Resource() 
 	{
-		// Make Buffer desc.
-		FORCEINLINE constexpr::D3D12_RESOURCE_DESC operator()(::UINT64 size, 
-			::UINT alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-			::D3D12_RESOURCE_FLAGS flags = ::D3D12_RESOURCE_FLAG_NONE) const noexcept
-		{
-			return::D3D12_RESOURCE_DESC
-			{
-				::D3D12_RESOURCE_DIMENSION_BUFFER, alignment,
-				size, 1u, 1ui16, 1ui16, ::DXGI_FORMAT_UNKNOWN,
-				{ 1u, 0u }, ::D3D12_TEXTURE_LAYOUT_ROW_MAJOR, flags
-			};
-		}
-		// Make Texutre1D desc.
-		FORCEINLINE constexpr::D3D12_RESOURCE_DESC operator()(::UINT64 width, ::DXGI_FORMAT format,
-			::UINT16 mipLevel = 1u, ::UINT16 arraySize = 1u, ::D3D12_RESOURCE_FLAGS flags = ::D3D12_RESOURCE_FLAG_NONE) const noexcept
-		{
-			return::D3D12_RESOURCE_DESC
-			{
-				::D3D12_RESOURCE_DIMENSION_TEXTURE1D, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-				width, 1u, arraySize, mipLevel, format, { 1u, 0u }, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-				flags,
-			};
-		}
-		// Texture2D desc.
-		FORCEINLINE constexpr::D3D12_RESOURCE_DESC operator()(::UINT64 width, ::UINT height,
-			::DXGI_FORMAT format, ::UINT16 mipLevel = 1u, ::UINT16 arraySize = 1u,
-			::D3D12_RESOURCE_FLAGS flags = ::D3D12_RESOURCE_FLAG_NONE) const noexcept {
-			return::D3D12_RESOURCE_DESC
-			{
-				::D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-				width, height, arraySize, mipLevel, format, { 1u, 0u }, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-				flags,
-			};
-		}
-		// For render target or depth stencil. 
-		// Tips: Once the format can be reconized by Utils.GetDSVFormat, ALLOW_DEPTH_STENCIL is set. Else ALLOW_RENDER_TARGET is set.
-		FORCEINLINE constexpr::D3D12_RESOURCE_DESC operator()(::UINT64 width, ::UINT height, ::DXGI_SAMPLE_DESC const& sampleDesc,
-			::DXGI_FORMAT format,
-			::D3D12_RESOURCE_FLAGS extra = ::D3D12_RESOURCE_FLAG_NONE) const noexcept {
-			auto dsvFormat = Utils.GetDSVFormat(format);
-			::D3D12_RESOURCE_FLAGS flags{ dsvFormat == DXGI_FORMAT_UNKNOWN ?
-				::D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : ::D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL };
-			return::D3D12_RESOURCE_DESC
-			{
-				::D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-				width, height, 1u, 1u, dsvFormat == DXGI_FORMAT_UNKNOWN ? format : dsvFormat, sampleDesc, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-				extra | flags,
-			};
-		}
-		// Texture3D desc.
-		FORCEINLINE constexpr::D3D12_RESOURCE_DESC operator()(::UINT64 width, ::UINT height, ::UINT16 depth,
-			::DXGI_FORMAT format, ::UINT16 mipLevel = 1u,
-			::D3D12_RESOURCE_FLAGS flags = ::D3D12_RESOURCE_FLAG_NONE) const noexcept {
-			return::D3D12_RESOURCE_DESC
-			{
-				::D3D12_RESOURCE_DIMENSION_TEXTURE3D, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-				width, height, depth, mipLevel, format, { 1u, 0u }, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-				flags,
-			};
-		}
-		// Conservative size.
-		FORCEINLINE constexpr::UINT64 operator()(::D3D12_RESOURCE_DESC const& desc) const
-		{
-			return desc.Width * desc.Height * desc.DepthOrArraySize * 2u;
-		}
-	} ResourceDesc{};
+		m_Handle->Release();
+	}
 
-	inline constexpr struct 
+	// Call only the resource ** IS ** buffer.
+	// Obtain subrange in [offset, offset + size).
+	inline inner::Pointer<Resource> Resource::Address()
 	{
-		FORCEINLINE constexpr auto operator()(::ID3D12Resource* resource, 
-			::D3D12_RESOURCE_STATES stateBefore,::D3D12_RESOURCE_STATES stateAfter, 
-			::UINT subresourceIndex = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-			::D3D12_RESOURCE_BARRIER_FLAGS flags =::D3D12_RESOURCE_BARRIER_FLAG_NONE) const
-		{ return::D3D12_RESOURCE_BARRIER{ ::D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, flags, { resource, subresourceIndex, stateBefore, stateAfter } }; }
+		MODEL_ASSERT(Desc.Dimension == ::D3D12_RESOURCE_DIMENSION_BUFFER, "Texture cannot get address.");
+		return
+		{
+			share::shared_from_this(),
+			BaseAddress(),
+			Size, 0u,
+		};
+	}
 
-		FORCEINLINE constexpr auto operator()(::ID3D12Resource* before, ::ID3D12Resource* after,
-			::D3D12_RESOURCE_BARRIER_FLAGS flags = ::D3D12_RESOURCE_BARRIER_FLAG_NONE) const
-		{ return::D3D12_RESOURCE_BARRIER{ ::D3D12_RESOURCE_BARRIER_TYPE_ALIASING, flags, {.Aliasing{before, after} } }; }
+	// Call only the resource ** is NOT ** buffer.
+	// obtain subresource range in [index, index + count).
+	inline inner::Pointer<Resource> Resource::SubresourceOf(::UINT index, ::UINT count)
+	{
+		MODEL_ASSERT(Desc.Dimension != ::D3D12_RESOURCE_DIMENSION_BUFFER, "Buffer would have subresource.");
+		
+		return
+		{
+			.Backing{ shared_from_this() },
+			.Address{ 0u },
+			.SubresourceIndex{ index },
+			.NumSubresource{ count },
+			.ArrayIndex{ static_cast<::UINT16>(index / Desc.MipLevels) },
+			.MipLevels{ static_cast<::UINT16>(Desc.MipLevels - index % Desc.MipLevels) },
+		};
+	}
 
-		FORCEINLINE constexpr::D3D12_RESOURCE_BARRIER operator()(::ID3D12Resource* uav,
-			::D3D12_RESOURCE_BARRIER_FLAGS flags = ::D3D12_RESOURCE_BARRIER_FLAG_NONE)
-		{ return::D3D12_RESOURCE_BARRIER{ ::D3D12_RESOURCE_BARRIER_TYPE_UAV, flags, {.UAV{uav}} }; }
-	} ResourceBarrier{};
+	// DEBUG ONLY: memcmp the resource location with specified range.
+	// *** Only for upload/readback buffer ***	
+	inline void Resource::VerifyResourceLocation(inner::Pointer<Resource> const& location, ::std::span<::std::byte> bytes)
+	{
+#if D3D12_MODEL_DEBUG
+		MODEL_ASSERT(location.Size == bytes.size(), "Size must match when cmp the range.");
+		MODEL_ASSERT(location.Address, "Method only for buffer.");
+		::std::byte* tar{ nullptr };
+		m_Handle->Map(0u, nullptr, (void**)&tar);
+		auto result = ::std::memcmp(tar + location.Offset, bytes.data(), location.Size);
+		MODEL_ASSERT(!result, "Resource is different in speified range.");
+
+		m_Handle->Unmap(0u, nullptr);
+#endif // D3D12_MODEL_DEBUG
+	}
+
+	// DEBUG ONLY: memcmp the resource location with specified range.
+	// *** Only for upload/readback buffer ***	
+	inline void Resource::VerifyResourceLocation(::D3D12_GPU_VIRTUAL_ADDRESS address, ::std::span<::std::byte> bytes)
+	{
+#if D3D12_MODEL_DEBUG
+		MODEL_ASSERT(address, "Address is 0.");
+
+		::std::byte* tar{ nullptr };
+		m_Handle->Map(0u, nullptr, (void**)&tar);
+		auto offset = address - BaseAddress();
+		auto result = ::std::memcmp(tar + offset, bytes.data(), bytes.size());
+		MODEL_ASSERT(!result, "Resource is different in speified range.");
+
+		m_Handle->Unmap(0u, nullptr);
+#endif // D3D12_MODEL_DEBUG
+	}
+
+	inline Resource::operator::ID3D12Resource* () const
+	{
+		this->GetDevice().UpdateResidency(this);
+
+		if (Type == Placed)
+			this->GetDevice().UpdateResidency(static_cast<const PlacedResource*>(this)->BackingPosition.Backing.lock().get());
+
+		return m_Handle;
+	}
+
 }
-
-//template<typename AccessType, typename...Args>
-//::std::shared_ptr<AccessType> Lock(::D3D12_RANGE const& range, Args&&...args) 
-//{
-//	assert(!m_Mapped.empty() && "Resource cannot be access.");
-//	return::std::make_shared<AccessType>(
-//		Pointer{ BaseAddress() + range.Begin, m_Mapped.subspan(range.Begin, range.End - range.Begin), weak_from_this() },
-//		::std::forward<Args>(args)...);
-//}

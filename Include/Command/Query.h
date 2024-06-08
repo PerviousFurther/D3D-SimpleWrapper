@@ -1,71 +1,86 @@
 #pragma once
 
-#include "Misc\ObjectSet.h"
 
-namespace twen 
+namespace twen
 {
-	inline constexpr struct 
+	inline constexpr struct
 	{
 		bool operator()(::D3D12_QUERY_HEAP_TYPE heapType, ::D3D12_QUERY_TYPE queryType) const;
 	} CheckQueryTypeIsAllow;
 
-	class QuerySet;
-
-	template<>
-	struct Pointer<QuerySet> 
+	// Modify create query pointer on d3d12 heap.
+	class QueryHeap
+		: public inner::ShareObject<QueryHeap>
+		, public inner::DeviceChild
+		, public inner::MultiNodeObject
+		, public Residency::Resident
 	{
-		::std::weak_ptr<QuerySet> BackingSet;
-		const::UINT Offset;
-		const::UINT	Capability;
-		
-		::D3D12_QUERY_TYPE Type;
-		::std::weak_ptr<AccessibleBuffer> OutDestination; // Requires readback buffer. If check is redunctant, set this buffer directly.
-
-		void Destination(::std::shared_ptr<AccessibleBuffer> pointer); // Set resource safely.
-		operator bool() const { return OutDestination.expired() && BackingSet.expired(); }
-	};
-
-	struct DirectContext;
-
-	class QuerySet : public ShareObject<QuerySet>, public DeviceChild, public SetManager<QuerySet>
-	{
-		friend struct SetManager<QuerySet>;
 	public:
+
+		using this_t = QueryHeap;
+		using share = inner::ShareObject<this_t>;
 		using interface_t = ::ID3D12QueryHeap;
 		using sort_t = ::D3D12_QUERY_HEAP_TYPE;
-		using argument_t =::D3D12_QUERY_TYPE;
+		using argument_t = ::D3D12_QUERY_TYPE;
+
+		TWEN_ISCA Alignment{ 1u };
+
 	public:
-		QuerySet(Device& device, ::D3D12_QUERY_HEAP_TYPE type, ::UINT count);
-		operator interface_t* const () const { return m_Handle.Get(); }
+
+		QueryHeap(Device& device, ::D3D12_QUERY_HEAP_TYPE type, ::UINT count, ::UINT visible = 0u)
+			: DeviceChild{ device }
+			, Resident{ resident::QueryHeap, count }
+			, MultiNodeObject{ visible, device.NativeMask }
+			, Type{ type }
+		{
+			MODEL_ASSERT(count, "Query heap cannot be empty.");
+
+			::D3D12_QUERY_HEAP_DESC desc{ Type, count, VisibleMask };
+			device->CreateQueryHeap(&desc, IID_PPV_ARGS(&m_Handle));
+
+			MODEL_ASSERT(m_Handle, "Failed to create query heap.");
+		}
+
+		QueryHeap(const QueryHeap&) = delete;
+
+		void Evict() const { GetDevice().Evict(this); }
+
+		inner::Pointer<QueryHeap> Address();
+
+		operator interface_t* const () const { return m_Handle; }
+
 	public:
-		const sort_t Type;		// Heap type.
+
+		const sort_t Type; // Heap type.
+
 	private:
-		Pointer<QuerySet> AddressOf(::UINT offset, ::UINT count);
-		void DiscardAt(Pointer<QuerySet> const& address);
-	private:
-		ComPtr<::ID3D12QueryHeap> m_Handle;
+
+		::ID3D12QueryHeap* m_Handle;
 	};
-	inline QuerySet::QuerySet(Device& device, ::D3D12_QUERY_HEAP_TYPE type, ::UINT count)
-		: DeviceChild{ device }
-		, SetManager{ count }
-		, Type{ type }
-	{
-		assert(count && "Query heap cannot be zero size.");
+}
 
-		::D3D12_QUERY_HEAP_DESC desc{ Type, count, device.NativeMask, };
-		device->CreateQueryHeap(&desc, IID_PPV_ARGS(m_Handle.Put()));
-
-		assert(m_Handle && "Failed to create query heap.");
-		SET_NAME(m_Handle, ::std::format(L"QueryHeap{}", ID));
-	}
-
-	inline Pointer<QuerySet> QuerySet::AddressOf(::UINT offset, ::UINT count)
+namespace twen::inner 
+{
+	template<>
+	struct Pointer<QueryHeap> : PointerBase<QueryHeap>
 	{
-		return { weak_from_this(), offset, count };
-	}
-	inline void Pointer<QuerySet>::Destination(::std::shared_ptr<AccessibleBuffer> readbackBuffer)
+		::D3D12_QUERY_TYPE Type;
+
+		inline Pointer<QueryHeap> Subrange(::UINT64 offset, ::UINT64 size) const
+		{
+			MODEL_ASSERT(offset + size <= Size, "Out of range.");
+			return { Backing, Offset + offset, size, nullptr, Type };
+		}
+	};
+}
+
+// Definition.
+
+namespace twen 
+{
+
+	inline inner::Pointer<QueryHeap> twen::QueryHeap::Address()
 	{
-		// check not enabled.
-		OutDestination = readbackBuffer;
+		return { weak_from_this(), 0u, Size, nullptr, ::D3D12_QUERY_TYPE_OCCLUSION, };
 	}
 }

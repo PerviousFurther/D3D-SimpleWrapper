@@ -1,338 +1,934 @@
 #pragma once
 
-namespace twen
+namespace twen 
 {
-	namespace Bindings 
+	struct Fence final
 	{
-		template<typename> struct Bindable;
-	}
-
-	class GraphicsPipelineState;
-	class ComputePipelineState;
-	class QuerySet;
-	class DescriptorSet;
-	class RootSignature;
-	class VertexBuffer;
-	class IndexBuffer;
-
-	namespace CommandLists 
-	{
-		using Type =::ID3D12GraphicsCommandList4;
-	}
-
-	struct DECLSPEC_NOVTABLE Context
-	{
-		friend class Queue;
-		friend class CommandContextSet;
-		template<typename T> friend struct Bindings::Bindable;
-	public:
-		using sort_t = ::D3D12_COMMAND_LIST_TYPE;
-
-		virtual ~Context() = default;
-	public:
-		template<typename ResourceT>
-		inline void Transition(::std::shared_ptr<ResourceT> resource, ::D3D12_RESOURCE_STATES newState, auto&&...args)
-		{ 
-			::D3D12_RESOURCE_BARRIER barrier = resource->Transition(newState, ::std::forward<decltype(args)>(args)...);
-			if(barrier.Transition.StateAfter != barrier.Transition.StateBefore)
-				m_Barriars.push_back(::std::move(barrier)); 
+		Fence(Device& device, ::D3D12_FENCE_FLAGS flags = ::D3D12_FENCE_FLAG_NONE)
+		{
+			device->CreateFence(0u, flags, IID_PPV_ARGS(&m_Fence));
+			MODEL_ASSERT(m_Fence, "Create fence failure.");
 		}
 
-		template<typename ResourceT>
-		inline void Alias(::std::shared_ptr<ResourceT> resource, ::std::shared_ptr<ResourceT> other, auto&&...args)
-		{ m_Barriars.push_back(resource->Aliasing(other, ::std::forward<decltype(args)>(args)...)); }
+		Fence(Fence&&) = default;
+		Fence& operator=(Fence&&) = default;
 
-		void UAVBarrier(auto&&...UNFINISHED);
-
-		inline void FlushBarriars()
-		{ CommandList->ResourceBarrier(static_cast<::UINT>(m_Barriars.size()), m_Barriars.data()), m_Barriars.clear(); }
-
-		void BeginQuery(Pointer<QuerySet> const& query);
-		void EndQuery(Pointer<QuerySet> const& query);
-
-		void Wait(::std::shared_ptr<Queue> queue, ::UINT64 value);
-
-		template<inner::congener<Context> ContextT> 
-		ContextT& As() { assert(Type == ContextT::Type && "Wrong cast."); 
-						 return static_cast<ContextT&>(*this); }
-	public:
-		const sort_t Type;
-		CommandLists::Type* const CommandList; // Do not call release directly.
-	protected:
-		Context(CommandLists::Type* listToRecord, sort_t type)
-			: Type{type}, CommandList{listToRecord} {}
-	protected:
-		::std::vector<::D3D12_RESOURCE_BARRIER> m_Barriars;
-	};
-
-	struct ComputeContext;
-	struct DirectContext : Context
-	{
-		template<typename T> friend struct Bindings::Bindable;
-		template<typename T> friend class ConstantBuffer;
-
-		// Remove in future.
-		friend class Texture;
-		friend class Buffer;
-		friend class VertexBuffer;
-		friend class IndexBuffer;
-
-		friend class RenderBuffer;
-		friend class DepthStencil;
-	public:
-		static constexpr auto Type{ ::D3D12_COMMAND_LIST_TYPE_DIRECT };
-	public:
-		DirectContext(CommandLists::Type* listToRecord,
-			::std::shared_ptr<GraphicsPipelineState> pso, ::std::vector<::std::shared_ptr<DescriptorSet>> const& sets);
-
-		DirectContext(CommandLists::Type* listToRecord, 
-			::std::shared_ptr<RootSignature> rso, ::std::shared_ptr<GraphicsPipelineState> pso,
-			::std::vector<::std::shared_ptr<DescriptorSet>> const& descriptorSets);
-
-		DirectContext(CommandLists::Type* listToRecord)
-			: Context{listToRecord, Type}
-		{} // Create as an copy queue.
-
-		DirectContext(DirectContext const& upperContext);
-		~DirectContext();
-	public:
-		void Viewport(::D3D12_RECT viewPort);
-
-		template<typename Bindable>
-		inline void Bind(::std::shared_ptr<Bindable> bindable, auto&&...args)
-			//requires requires { bindable->Bind(*this, ::std::forward<decltype(args)>(args)...); }
-		{ bindable->Bind(*this, ::std::forward<decltype(args)>(args)...); }
-
-		template<typename CopyOperator>
-		inline void Copy(::std::shared_ptr<CopyOperator> copyable, auto&&...args) 
-		{ copyable->Copy(*this, ::std::forward<decltype(args)>(args)...); }
-
-		void BeginRenderPass(const float rtvClearValue[4], ::D3D12_DEPTH_STENCIL_VALUE dsvClearValue = {}, 
-			bool clearDepth = false, bool clearStencil = false);
-
-		//void BeginDescriptorTable(bool isSampler = false);
-		//void EndDescriptorTable(::UINT rootIndex, bool isSampler = false);
-
-		void Draw(::D3D_PRIMITIVE_TOPOLOGY topology, ::UINT vertexCountOrNumIndexPerVertex, ::UINT instanceCount = 1u);
-
-		void EndRenderPass();
-	private:
-		void LinkPipeline(::std::shared_ptr<GraphicsPipelineState> pso);
-
-
-		struct Agreement 
+		~Fence() 
 		{
-			~Agreement() 
-			{
-				if (List) 
-					List->SetGraphicsRootDescriptorTable(Root, PositionGPU);
-			}
-			operator::D3D12_CPU_DESCRIPTOR_HANDLE() const 
-			{
-				return PositionCPU;
-			}
-		
-			::D3D12_CPU_DESCRIPTOR_HANDLE PositionCPU;
-			CommandLists::Type* List;
-			::UINT Root;
-			::D3D12_GPU_DESCRIPTOR_HANDLE PositionGPU;
-		};
-
-		using HandleCpu = Agreement;
-		using HandleGpu = ::D3D12_GPU_DESCRIPTOR_HANDLE;
-
-		bool IsOnDescriptorTable(::UINT index) const 
-		{ assert(m_Roots.size() > index); return m_Roots.at(index).Type == ::D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; }
-		Agreement ObtainHandle(::UINT index, ::UINT indexOfRange)
-		{
-			auto& bind{ m_Roots.at(index) };
-			if (bind.Type !=::D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) 
-			{
-				MODEL_ASSERT(false, "Not an table.");
-				return {};
-			} else {
-				MODEL_ASSERT(bind.Ranges.size() > indexOfRange, "Out of range.");
-
-				auto& range{ bind.Ranges.at(indexOfRange) };
-				const bool isSampler{ range.Type == ::D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER };
-
-				MODEL_ASSERT(range.BindedInput, "This range wasnt bound by any input.");
-
-				auto& input{ *range.BindedInput };
-
-				auto const& handle = m_Handles.at(isSampler ?
-					::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER : ::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-				
-				return{ handle[input.Space + input.BindCount++], input.BindCount == range.Count ? CommandList : nullptr, input.BindPoint, handle(input.Space) };
-			}
-		}
-
-		::D3D12_CPU_DESCRIPTOR_HANDLE ObtainHandle(::D3D12_DESCRIPTOR_HEAP_TYPE type, ::UINT index)
-		{
-			MODEL_ASSERT(m_Handles.contains(type), "Specified Type is not existing.");
-			return m_Handles.at(type)[index];
-		}
-		bool IsOnDescriptorTable(::std::string_view name)
-		{
-			MODEL_ASSERT(m_Binds.contains(name), "Specifed name is not found. Check if the name is miswrite with lower case or upper case.");
-			return IsOnDescriptorTable(m_Binds.at(name).BindPoint);
-		}
-		::UINT ObtainRoot(::std::string_view name)
-		{
-			MODEL_ASSERT(m_Binds.contains(name), "Didnt contain spciefied named object.");
-
-			return m_Binds.at(name).BindPoint;
-		}
-		// Obtain descriptor handle's position by name in shader's input to create view.
-		Agreement ObtainHandle(::std::string_view name)
-		{
-			if (m_Binds.contains(name))
-			{
-				auto& input{ m_Binds.at(name) };
-				const bool isSampler{ input.Type == ::D3D_SIT_SAMPLER };
-
-				MODEL_ASSERT(input.BindedRange, "Input didnt bind a range.");
-				MODEL_ASSERT(input.BindedRange->Count > input.BindCount, "Bind too many resource on point.");
-
-				auto const& handle = m_Handles.at(isSampler ?
-					::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER : ::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-				return{ handle[input.Space + input.BindCount++], (input.BindCount == input.BindedRange->Count) ? CommandList : nullptr, input.BindPoint, handle(input.Space) };
-			}
-
-			MODEL_ASSERT(false, "Didnt contains named bind point.");
-
-			return {};
+			m_Fence->Release();
 		}
 	private:
-		::UINT m_NumRenderTarget;
-		bool m_EnableDepth;			// from pipeline.
-		::std::vector<Descriptors::Root> m_Roots;
-		::std::vector<Descriptors::Static> m_StaticSampler;
-
-		::std::unordered_map<::std::string_view, Shaders::Input> m_Binds;
-		::std::unordered_map<::D3D12_DESCRIPTOR_HEAP_TYPE, Pointer<DescriptorSet>> m_Handles;
+		::ID3D12Fence* m_Fence;
 	};
 
-	class Texture;
-	class TextureCopy;
-
-	struct DECLSPEC_EMPTY_BASES CopyContext : Context
+	struct SyncPoint 
 	{
-		template<typename T> friend struct Bindings::Bindable;
-	public:
-		static constexpr auto Type{ ::D3D12_COMMAND_LIST_TYPE_COPY };
-	public:
-		CopyContext(CommandLists::Type* listToRecord)
-			: Context{listToRecord, Type} {}
-	public:
-		template<typename CopyOperator>
-		inline void Copy(::std::shared_ptr<CopyOperator> copyable, auto&&...args)
-		{ copyable->Copy(*this, ::std::forward<decltype(args)>(args)...); }
-	};
-	
-	struct ComputeContext : public Context 
-	{
-		template<typename T> friend struct Bindings::Bindable;
-	public:
+		::UINT64 FenceValue;
 
-	public:
-		::std::weak_ptr<ComputePipelineState> m_StateCompute;
-		::std::weak_ptr<RootSignature> RootSignature;
-		Pointer<DescriptorSet> m_IndirectArgument;
+		Fence* Fence;
 	};
+
 }
 
 namespace twen
 {
-	// Each manager repersented an thread, in ideal situation.
-	class CommandContextSet : public::std::enable_shared_from_this<CommandContextSet>, public DeviceChild
+	class CommandContext
+		: inner::DeviceChild
 	{
-		friend class Queue;
+		friend class Device;
 	public:
-		using sort_t =::D3D12_COMMAND_LIST_TYPE;
+		using command_list_type = ::ID3D12GraphicsCommandList4;
+		using command_list_allocator = ::ID3D12CommandAllocator;
+
+		class DirectCommandContext;
+		class ComputeCommandContext;
+		class CopyCommandContext;
+
+		TWEN_ISC::D3D12_COMMAND_LIST_TYPE Types[]
+		{
+			::D3D12_COMMAND_LIST_TYPE_DIRECT,
+			::D3D12_COMMAND_LIST_TYPE_COPY,
+			::D3D12_COMMAND_LIST_TYPE_COMPUTE,
+		};
+
 	public:
-		CommandContextSet(Device& device, sort_t type)
-			: DeviceChild{device}, Type{type}
+
+		CommandContext(CommandContext const&) = delete;
+		CommandContext& operator=(CommandContext const&) = delete;
+		~CommandContext()
 		{
-			device->CreateCommandAllocator(Type, IID_PPV_ARGS(m_Allocator.Put()));
-			assert(m_Allocator && "Create compute command allocator failure.");
-			SET_NAME(m_Allocator, L"CommandAllocator");
-		}
-
-		template<inner::congener<Context> ContextT, typename...Ts>
-		inline::std::unique_ptr<ContextT> Begin(Ts&&...args)
-			requires::std::constructible_from<ContextT, CommandLists::Type*, Ts...> 
-		{
-			assert(ContextT::Type == this->Type && "Type mismatch.");
-			assert(!IsOpen && "Must not in open state.");
-
-			if (Submitted) Reset();
-
-			auto& device{ GetDevice() };
-			CommandLists::Type* commandList;
-			device->CreateCommandList(device.NativeMask, ContextT::Type, m_Allocator.Get(), nullptr, IID_PPV_ARGS(&commandList));
-			assert(commandList && "Create command list failure.");
-
-			IsOpen = true;
-			return::std::make_unique<ContextT>(commandList, ::std::forward<Ts>(args)...);
-		}
-		
-		// helper.
-		inline void Close(::std::unique_ptr<DirectContext>& context) { Close(::std::move(context)); }
-		inline void Close(::std::unique_ptr<CopyContext>& context) { Close(::std::move(context)); }
-		inline void Close(::std::unique_ptr<ComputeContext>& context) { Close(::std::move(context)); }
-
-		inline void Close(::std::unique_ptr<Context>&& context) 
-		{
-			assert(IsOpen && "Haven't begun.");
-			assert(context->Type == Type && "Commandlist's type is mismatched.");
-
-			if(context->m_Barriars.size()) context->FlushBarriars();
-
-			auto hr = context->CommandList->Close();
-			if (FAILED(hr))
+			// discard allocators.
+			for (auto& [_,allocator] : m_Allocators) 
 			{
-			#if D3D12_MODEL_DEBUG
-				auto message = GetDevice().Message();
-
-				auto size = MultiByteToWideChar(CP_UTF8, NULL, message.data(), static_cast<int>(message.size()), nullptr, 0);
-				::std::wstring wMessage(size, '\0');
-				MultiByteToWideChar(CP_UTF8, NULL, message.data(), static_cast<int>(message.size()), wMessage.data(), static_cast<int>(message.size()));
-
-				_wassert(wMessage.data(), __FILEW__, __LINE__);
-			#else
-				throw::std::exception("Inner error.");
-			#endif
+				allocator->Release();
 			}
-
-			m_Payloads.push_back(context->CommandList);
-			m_Contexts.push_back(::std::move(context));
-			IsOpen = false;
-		}
-		inline void Reset() 
-		{
-			if (!m_ExecutionQueue.expired()) 
+			// discard payloads.
+			for (auto& [_, payloads] : m_Payloads) 
 			{
-				auto queue{ m_ExecutionQueue.lock() };
-				queue->Wait(m_LastTicket);
-
-				m_Allocator->Reset();
-				m_Contexts.clear();
-
-				m_ExecutionQueue.reset();
-				Submitted = false;
+				for (auto& payload : payloads) 
+				{
+					payload->Release();
+				}
 			}
 		}
-		const sort_t Type;
+
+	public:
+
+		// We assume the giving function is can be invoked with command context.
+		template<typename Fn>
+		void ExecuteOnMain(/*Device* device, */Fn&& fn)
+			requires::std::invocable<Fn, CommandContext::DirectCommandContext*>;
+
+		// We assume the giving function is can be invoked with copy context.
+		// TODO: Judge from Fn's parameter type to decide Create which type of context.00+
+		template<typename Fn>
+		void ExecuteOnBatch(/*Device* device, */Fn&& fn) requires
+			::std::invocable<Fn, CommandContext::CopyCommandContext*> ||
+			::std::invocable<Fn, CommandContext::ComputeCommandContext*> ||
+			::std::invocable<Fn, CommandContext::DirectCommandContext*>;
+
+		void Commit();
+
 	private:
-		bool IsOpen{false};
-		bool Submitted{false};
+		CommandContext(Device& device) 
+			: DeviceChild{device}
+		{
+			// TODO: ?
+			for (auto const& type : Types) 
+			{
+				device->CreateCommandAllocator(type, IID_PPV_ARGS(&m_Allocators[type]));
+				MODEL_ASSERT(m_Allocators[type], "Recorded failure.");
+			}
+		}
+	private:
 
-		::UINT64 m_LastTicket;
-		ComPtr<::ID3D12CommandAllocator> m_Allocator;
+		template<typename T>
+		T* CreateNewContext(Device& device)
+		{
+			if (!GetDevice().m_ResidencyManager->Recording())
+				GetDevice().m_ResidencyManager->BeginRecordingResidentChanging();
 
-		::std::vector<::std::unique_ptr<Context>> m_Contexts;
-		::std::vector<::ID3D12CommandList*> m_Payloads;
-		::std::weak_ptr<Queue> m_ExecutionQueue;
+			command_list_type* cmdlist{nullptr};
+			auto hr = device->CreateCommandList(device.AllVisibleNode(), T::Type, m_Allocators.at(T::Type), nullptr, IID_PPV_ARGS(&cmdlist));
+
+			MODEL_ASSERT(SUCCEEDED(hr), "Create command list failure.");
+
+			MODEL_ASSERT(cmdlist, "Create command list failure.");
+			
+			return new T{ this, cmdlist, T::Type };
+		}
+
+		using payload_type = ::ID3D12CommandList*;
+		using states_type = ::std::vector<::D3D12_RESOURCE_STATES>;
+
+		struct ResourceStateTracker;
+
+		template<typename Child>
+		struct BindableContext;
+
+		template<typename Child>
+		struct BarrierContext;
+
+		template<typename Child>
+		struct CopyContext;
+
+		struct ContextCommon;
+
+		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE,
+			command_list_allocator*> m_Allocators;
+
+		::std::vector<ContextCommon*> m_ActiveContexts{};
+
+		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, 
+			::std::vector<payload_type>> m_Payloads;
+
+		::std::unordered_map<Resource*, 
+			ResourceStateTracker*> m_States{};
 	};
+
+												//===============================/\
+												
+												//              *                =
+																			      
+												//       Resource barrier        =
+																			      
+												//              *                =
+
+												//===============================/\
+
+	struct CommandContext::ResourceStateTracker 
+	{
+		// TODO: Currently, we dont know when should the state update. 
+		//       If other thread also need to transition the state, what barrier should it access.
+		bool UpdateState(::D3D12_RESOURCE_STATES state, ::UINT subresourceIndex, ::std::vector<::D3D12_RESOURCE_BARRIER>& barriers)
+		{
+			::std::unique_lock _{ Mutex };
+
+			MODEL_ASSERT(subresourceIndex == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES ? true : subresourceIndex < States.size(), "Out of range.");
+
+			if (subresourceIndex != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
+			{
+				auto oldState = States.at(subresourceIndex);
+
+				// We currently only check the state is same with before.
+				if (oldState == state)
+					return false;
+
+				States.at(subresourceIndex) = state;
+
+				barriers.emplace_back(Utils::ResourceBarrier(*Resource, oldState, state, subresourceIndex));
+			} else for (auto index{ 0u }; auto& oldState : States) {
+			// Only emplace the state that is not same.
+				if (oldState != state)
+				{
+					barriers.emplace_back(Utils::ResourceBarrier(*Resource, oldState, state, index));
+					oldState = state;
+				}
+
+				index++;
+			}
+			return true;
+		}
+
+		template<typename View, typename Ext>
+		ResourceStateTracker(::std::shared_ptr<Views::Bindable<View, Ext>> bindable) 
+			: Resource{ bindable->BackingResource() }
+		{
+			auto initState = inner::Transition<View>{}(ResourceCurrentStage::Idle);
+
+			if (bindable->IsTexture())
+				States.resize(bindable->ResourcePosition().NumSubresource, initState);
+			else
+				States.resize(1u, initState);
+		}
+
+		//ResourceStateTracker(ResourceStateTracker const&) = delete;
+		//ResourceStateTracker& operator=(ResourceStateTracker const&) = delete;
+
+		//ResourceStateTracker(ResourceStateTracker&&) = default;
+		//ResourceStateTracker& operator=(ResourceStateTracker&&) = default;
+
+		::std::mutex Mutex{};
+
+		Resource* Resource{nullptr};
+		::std::vector<::D3D12_RESOURCE_STATES> States{};
+	};
+
+	template<typename Child>
+	struct CommandContext::BarrierContext
+	{
+		template<typename View, typename Ext>
+		using shared_view = ::std::shared_ptr<Views::Bindable<View, Ext>>;
+
+		// Transition the view to specified stage. this method was recommanded.
+		template<typename View, typename Ext>
+		bool Transition(shared_view<View, Ext> view, ResourceCurrentStage nextStage) noexcept
+		{
+			auto state = inner::Transition<View>{}(nextStage);
+
+			return Transition(view, state);
+		}
+
+		// Transition the view to specified state.
+		template<typename View, typename Ext>
+		bool Transition(shared_view<View, Ext> view, ::D3D12_RESOURCE_STATES newState) noexcept
+		{
+			CommandContext* context = static_cast<const Child*>(this)->ParentContext();
+
+			// TODO: do check.
+
+			if (!context->m_States.contains(view->BackingResource()))
+				context->m_States.emplace(view->BackingResource(), new ResourceStateTracker{view});
+
+			return context->m_States.at(view->BackingResource())->UpdateState(newState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, m_Barriers);
+		}
+		template<typename View, typename Ext>
+		bool Transition(shared_view<View, Ext> view, ::D3D12_RESOURCE_STATES before, ::D3D12_RESOURCE_STATES newState) noexcept
+		{
+			CommandContext* context = static_cast<const Child*>(this)->ParentContext();
+
+			// TODO: do check.
+
+			if (!context->m_States.contains(view->BackingResource()))
+				context->m_States.emplace(view->BackingResource(), new ResourceStateTracker{ view });
+
+			return context->m_States.at(view->BackingResource())->UpdateState(newState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, m_Barriers);
+		}
+		// Clean up all storaged barrier.
+		void FlushBarriers() 
+		{ 
+			static_cast<Child*>(this)->m_CommandList->ResourceBarrier(static_cast<::UINT>(m_Barriers.size()), m_Barriers.data());
+			m_Barriers.clear();
+		}
+		// TODO: alias...
+		// TODO: uav barrier...
+
+		::std::vector<::D3D12_RESOURCE_BARRIER> m_Barriers{};
+	};
+
+
+											//===============================/\
+											
+											//              *                = 
+
+											//        Resource binding.      =
+
+											//              *                =
+
+											//===============================/\
+
+
+	template<typename Child>
+	struct CommandContext::BindableContext
+	{
+		template<typename View, typename Ext>
+		using shared_view = ::std::shared_ptr<Views::Bindable<View, Ext>>;
+
+		using root_signature = ::std::shared_ptr<RootSignature>;
+		using pipeline_state = ::std::shared_ptr<Pipeline>;
+
+		void BindDescriptorHeap() 
+		{
+			DescriptorManager* descriptorManager = static_cast<Child*>(this)
+				->ParentContext()->GetDevice().DescriptorManager();
+			auto heaps = descriptorManager->GetHeaps();
+			static_cast<Child*>(this)->CommandList()->SetDescriptorHeaps(2u, heaps.data());
+		}
+		void InitDescriptor(::D3D12_DESCRIPTOR_HEAP_TYPE type, inner::Pointer<DescriptorHeap>& pointer, ::UINT num)
+		{
+			if (pointer.Vaild()) 
+				pointer.Fallback();
+			pointer.Size = num;
+			pointer.Backing.reset();
+
+			DescriptorManager* descriptorManager = static_cast<Child*>(this)
+				->ParentContext()->GetDevice().DescriptorManager();
+			// TODO: Very temporary...
+			if (num) 
+				pointer = descriptorManager->GetDescriptors(type, num);
+		}
+
+		~BindableContext() 
+		{
+			for (auto const& [_, ptr] : m_DescriptorHandles) 
+				ptr.Pointer.Fallback();
+		}
+
+		struct Info
+		{
+			inner::Pointer<DescriptorHeap> Pointer;
+			::UINT8 Bound{ 0u };
+		};
+
+		/*void BindDefualtDescriptorHeap() 
+		{
+			static_cast<Child*>(this)->GetDevice
+		}*/
+
+		// Bind resource guide by shader input binding desc.
+		template<typename View, typename Ext>
+		bool Bind(::std::shared_ptr<Views::Bindable<View, Ext>> view, Shaders::Input const& bind) requires
+			// which means the view can be bind in any context. When the constrain is not satisfied.
+			// it means the view cannot bind on current context.
+			requires{ typename View::common_bind; }
+		{
+			MODEL_ASSERT(m_RootSignature, "Please set root signature at first.");
+
+			Roots::ParameterType type;
+			// get binding desc from shader.
+			auto rootType{ Utils::ToRootParameterType(bind.Type) };
+			// should on descriptor table.
+			if (rootType)
+				type = Roots::ParameterTypeFrom(Utils::ToRootParameterType(bind.Type));
+			else
+				type = Roots::ParameterTypeFrom(Utils::ToDescriptorRangeType(bind.Type));
+
+			if (type == 0xff) return false;
+
+			// Get descriptor info.
+			auto const& descriptor = m_RootSignature->Map(bind.BindPoint, bind.Space, type);
+			if (descriptor.OnTable()) 
+			// descriptor on table.
+			{
+				auto& handles{m_DescriptorHandles}; // alias. nothing special.
+				auto it = handles.find(static_cast<::UINT16>(descriptor.RootIndex));
+				if (it != handles.end()) 
+				// the allocation was recorded.
+				{
+					Info& info{it->second};
+					// Create view.
+					inner::Operation<View, Child::Type>{}(view, info.Pointer[info.Bound]);
+
+					// if it is full then set descriptor table
+					if (++info.Bound == info.Pointer.Size)
+						SetDescriptorTable<Child::Type>(descriptor.RootIndex, info.Pointer);
+				} else {
+					if (m_DescriptorHandles.empty())
+						BindDescriptorHeap();
+				// table wasnt bound, then allocate it from manager.
+					auto const& [iter, result] {handles.emplace(descriptor.RootIndex, Info{})};
+					MODEL_ASSERT(result, "BUG: emplace failure.");
+
+					Info& info{iter->second};
+					// allocate.
+					InitDescriptor(
+						View::DescriptorHeapType, 
+						info.Pointer,
+						// Get num of descriptor in the table.
+						m_RootSignature->NumAllocation(descriptor.RootIndex));
+					// Create view.
+					inner::Operation<View, Child::Type>{}(view, info.Pointer[info.Bound]);
+
+					// if it is full then set descriptor table (some maybe only one.)
+					if (++info.Bound == info.Pointer.Size)
+						SetDescriptorTable<Child::Type>(descriptor.RootIndex, info.Pointer);
+				}
+			} else {
+			// descriptor is root descriptor.
+				if constexpr (requires{ inner::Operation<View, Child::Type>{}; })
+					inner::Operation<View, Child::Type>{}(view, static_cast<Child*>(this)->CommandList(), descriptor.RootIndex);
+				else MODEL_ASSERT(false, "BUG: Sampler cannot bind on root.");
+			}
+
+			return true;
+		}
+
+		// This is reserved for bindless render.
+		// Setting descriptor heap for dynamic sampler and on heap resource descriptors.
+		// @return false means descriptor heap was not bind.
+		//bool BindDescriptor(inner::Pointer<DescriptorHeap> const& sampler, inner::Pointer<DescriptorHeap> const& csu) noexcept
+		//{
+		//	// descriptors pointer are too small.
+		//	if (csu.Size < m_DescriptorsResource.Size || sampler.Size < m_DescriptorsSampler.Size)
+		//		return false;
+		//	::ID3D12DescriptorHeap* heaps[2]{};
+		//	::UINT count{ 0u };
+		//	if (sampler.Size)
+		//		heaps[count++] = *sampler.Backing.lock();
+		//	if (csu.Size)
+		//		heaps[count++] = *csu.Backing.lock();
+		//	if (count)
+		//	{
+		//		static_cast<Child*>(this)->CommandList()->SetDescriptorHeaps(count, heaps);
+		//		return true;
+		//	}
+		//	else return false;
+		//}
+
+		template<::D3D12_COMMAND_LIST_TYPE type>
+		void SetDescriptorTable(::UINT root, inner::Pointer<DescriptorHeap> const& pointer, ::UINT index = 0u) 
+		{
+			if constexpr (type == ::D3D12_COMMAND_LIST_TYPE_DIRECT)
+				static_cast<Child*>(this)->CommandList()->SetGraphicsRootDescriptorTable(root, pointer(index));
+			else if constexpr(type == ::D3D12_COMMAND_LIST_TYPE_COMPUTE)
+				static_cast<Child*>(this)->CommandList()->SetComputeRootDescriptorTable(root, pointer(index));
+		}
+		// TODO: bindless...
+
+		::std::shared_ptr<Pipeline> m_Pipeline{};
+		::std::shared_ptr<RootSignature> m_RootSignature{};
+
+		// [Root, pointer]
+		// Allocation of descriptor heap.
+		::std::unordered_map<::UINT16, Info> m_DescriptorHandles;
+	};
+
+										//===============================/\
+										
+										//              *                =
+
+										// Resource copy and interaction =
+
+										//              *                =
+
+										//===============================/\
+
+	template<typename Child>
+	struct CommandContext::CopyContext 
+	{
+		// The method consume the dst view and src view have common characterist in them (subresource index/range).
+		// The behavior of this method is:
+		// 
+		// - If only one of the resource is texture. then the copy operation will based on that resource. 
+		//   Operation will interrupt if the buffer dont have enough space.
+		// - If both of the resource are texture, then copy the view of them.
+		//   Operation wont check though there have any potential risks.
+		// - If both of the resource is buffer, then select smaller range to copy.
+		template<typename DstView, typename SrcView>
+		void Copy(::std::shared_ptr<DstView> dstView, ::std::shared_ptr<SrcView> srcView) 
+		{
+			using tex_copy = ::D3D12_TEXTURE_COPY_LOCATION;
+
+			::twen::Resource* dst = dstView->BackingResource();
+			::twen::Resource* src = srcView->BackingResource();
+			
+			const auto srcIsTexture{ src->Desc.Dimension != ::D3D12_RESOURCE_DIMENSION_BUFFER };
+			const auto dstIsTexture{ dst->Desc.Dimension != ::D3D12_RESOURCE_DIMENSION_BUFFER };
+
+			inner::Pointer<Resource> const& srcPosition{ srcView->ResourcePosition() };
+			inner::Pointer<Resource> const& dstPosition{ dstView->ResourcePosition() };
+			command_list_type* cmdList = static_cast<Child*>(this)->CommandList();
+
+			if (dstIsTexture && srcIsTexture) // both texture.
+			{
+				auto size = (::std::min)(dstPosition.NumSubresource, srcPosition.NumSubresource);
+				for (auto index{ 0u }; index < size; index++) 
+				{
+					auto srcCopy = Utils::TextureCopy(*src, srcPosition.SubresourceIndex + index),
+					     dstCopy = Utils::TextureCopy(*dst, dstPosition.SubresourceIndex + index);
+
+					cmdList->CopyTextureRegion(&dstCopy, 0u, 0u, 0u, &srcCopy, nullptr);
+				}
+
+			} else if (dstIsTexture || srcIsTexture) { // one of the view is texture.
+
+				auto footprints{ dstIsTexture ? dst->Footprints() : src->Footprints() };
+				auto size{ dstIsTexture ? dstPosition.NumSubresource : srcPosition.NumSubresource };
+
+				for (auto index{0u}; index < size; index++)
+				{
+					tex_copy srcCopy;
+					tex_copy dstCopy;
+
+					if (dstIsTexture) 
+					{
+						auto footprint{ footprints[dstPosition.SubresourceIndex + index] };
+						// Cannot continue copy operation.
+						if ((footprint.Offset + static_cast<::UINT64>(footprint.Footprint.RowPitch) * footprint.Footprint.Height * footprint.Footprint.Depth) > srcPosition.Size)
+							return;
+
+						srcCopy = Utils::TextureCopy(*src, footprints[dstPosition.SubresourceIndex + index]),
+						dstCopy = Utils::TextureCopy(*dst, dstPosition.SubresourceIndex + index);
+
+					} else {
+
+						auto footprint{ footprints[srcPosition.SubresourceIndex + index] };
+						// Cannot continue copy operation.
+						if ((footprint.Offset + static_cast<::UINT64>(footprint.Footprint.RowPitch) * footprint.Footprint.Height * footprint.Footprint.Depth) > dstPosition.Size)
+							return;
+
+						dstCopy = Utils::TextureCopy(*dst, footprints[srcPosition.SubresourceIndex + index]),
+						srcCopy = Utils::TextureCopy(*src, srcPosition.SubresourceIndex + index);
+					}
+
+					cmdList->CopyTextureRegion(&dstCopy, 0u, 0u, 0u, &srcCopy, nullptr);
+				}
+
+			} else { // both buffer.
+				auto size{ dstPosition.Size > srcPosition.Size ? srcPosition.Size : dstPosition.Size };
+
+				cmdList->CopyBufferRegion(*dst, dstPosition.Offset, *src, srcPosition.Offset, size);
+			}
+
+		}
+
+		// TODO: sub range copy.
+
+		bool AssertOnState(auto&&...) 
+		{
+			return true;
+		}
+	};
+
+												//===============================/\
+												
+												//              *                =
+
+												//           Contexts            =
+
+												//              *                =
+
+												//===============================/\
+
+	struct CommandContext::ContextCommon 
+	{
+		friend class CommandContext;
+
+		CommandContext* ParentContext() const { return m_ParentContext; }
+		command_list_type* CommandList() const { return m_CommandList; }
+		
+		ContextCommon(CommandContext* parentContext, command_list_type* cmdList, ::D3D12_COMMAND_LIST_TYPE type) 
+			: m_ParentContext{parentContext} 
+			, m_CommandList{cmdList} 
+			, Type{type}
+		{}
+
+		~ContextCommon() = default;
+
+		const::D3D12_COMMAND_LIST_TYPE Type;
+
+	protected:
+
+		CommandContext* const m_ParentContext;
+		command_list_type* const m_CommandList;
+
+		// Specified the command list open or not.
+		bool IsOpen        : 1 {false};
+		// TODO : ?
+		bool OnQuery       : 1 {false};
+		// TODO : ?
+		bool IsPredicating : 1 {false}; 
+		// Indicate current command list is submitted.
+		bool Submmited     : 1 {false};
+		// indicate current command list is finished or not.
+		bool Finished      : 1 {false};
+	};
+
+	class CommandContext::DirectCommandContext 
+		: public ContextCommon
+		, CopyContext<DirectCommandContext>
+		, BarrierContext<DirectCommandContext>
+		, BindableContext<DirectCommandContext>
+	{
+		friend class CommandContext;
+	public:
+		// Indicate command list type of current context.
+		TWEN_ISCA Type{ ::D3D12_COMMAND_LIST_TYPE_DIRECT };
+
+		using ContextCommon::ContextCommon;
+		using ContextCommon::CommandList;
+		using ContextCommon::ParentContext;
+		using CopyContext::Copy;
+		using BarrierContext::Transition;
+		using BindableContext::Bind;
+		using BarrierContext::FlushBarriers;
+
+		~DirectCommandContext() 
+		{
+			if (m_DescriptorsRenderTarget.Vaild()) 
+				m_DescriptorsRenderTarget.Fallback();
+
+			if (m_DescriptorsDepthStencil.Vaild())
+				m_DescriptorsDepthStencil.Fallback();
+		}
+		// Bind render target or depth stencil to current context.
+		// render target wont have extension currently.
+		// @return false means pipeline was not set or no need to bind depth stencil.
+		template<typename View>
+		bool Bind(::std::shared_ptr<Views::Bindable<View>> renderTargetOrDepthStencil, ::UINT index = 0u) requires
+			(Views::is_rtv<View> || Views::is_dsv<View>)
+		{
+			MODEL_ASSERT(renderTargetOrDepthStencil, "Do not try to set empty render target.");
+			auto& pointer{ Views::is_rtv<View> ? m_DescriptorsRenderTarget : m_DescriptorsDepthStencil };
+
+			if (!pointer.Size) return false;
+			BindableContext::InitDescriptor(View::DescriptorHeapType, pointer, static_cast<::UINT>(pointer.Size));
+
+			inner::Operation<View, Type>{}(renderTargetOrDepthStencil, pointer[index]);
+			MODEL_ASSERT(!ParentContext()->m_States.contains(renderTargetOrDepthStencil->BackingResource()), "Should not bind this render target before.");
+
+			BarrierContext::Transition(renderTargetOrDepthStencil, ResourceCurrentStage::Write);
+
+			return true;
+		}
+
+		// Setting root signature.
+		void RootSignature(root_signature rootSignature) 
+		{
+			BindableContext::m_RootSignature = rootSignature;
+			m_CommandList->SetGraphicsRootSignature(*rootSignature);
+		}
+		// Setting legacy pipeline state.
+		void Pipeline(::std::shared_ptr<GraphicsPipelineState> state) 
+		{
+			BindableContext::m_Pipeline = state;
+			m_CommandList->SetPipelineState(*state);
+
+			m_DescriptorsRenderTarget.Size = state->RenderTargetCount;
+			m_DescriptorsDepthStencil.Size = state->DepthEnable ? state->RenderTargetCount : 0u;
+		}
+
+		// Clear render target and depth stencil (if pipeline enable depth writing.). Must set render target before this is call.
+		void ClearTarget(bool renderTarget = false, bool depth = false, bool stencil = false, ::std::vector<::D3D12_RECT> const& rect = {})
+		{
+			auto rtvHandle{ m_DescriptorsRenderTarget[0] };
+			auto dsvHandle{ m_DescriptorsDepthStencil[0] };
+			m_CommandList->OMSetRenderTargets((::UINT)m_DescriptorsRenderTarget.Size, &rtvHandle, true, m_DescriptorsDepthStencil.Size ? &dsvHandle : nullptr);
+
+			for (auto offset{ 0u }; offset < m_DescriptorsRenderTarget.Size; ++offset)
+			{
+				if (renderTarget) 
+					m_CommandList->ClearRenderTargetView(
+					m_DescriptorsRenderTarget[offset], 
+					Constants::ClearValue, 
+					static_cast<::UINT>(rect.size()), 
+					rect.data());
+				if (depth || stencil) 
+					m_CommandList->ClearDepthStencilView(
+					m_DescriptorsDepthStencil[offset], 
+					static_cast<::D3D12_CLEAR_FLAGS>(::D3D12_CLEAR_FLAG_DEPTH * depth | ::D3D12_CLEAR_FLAG_STENCIL * stencil), 
+					Constants::DepthClear, 
+					Constants::StencilClear, 
+					static_cast<::UINT>(rect.size()), 
+					rect.data());
+			}
+		}
+
+		// Not recommanded.
+		// Set viewport by { 0, 0, width, height }.
+		void Viewport(::UINT width, ::UINT height) 
+		{
+			::D3D12_VIEWPORT view
+			{
+				.Width{static_cast<float>(width)},
+				.Height{static_cast<float>(height)},
+				.MaxDepth{1.0f},
+			};
+			::D3D12_RECT rect
+			{
+				.right{static_cast<LONG>(width)},
+				.bottom{static_cast<LONG>(height)},
+			};
+			m_CommandList->RSSetViewports(1u, &view);
+			m_CommandList->RSSetScissorRects(1u, &rect);
+		}
+
+		// Implicit transition of resource state would take place on the render target and become idle state (...might be common).
+		// So we recommand you call this method before commit.
+		void Copy(::std::shared_ptr<RenderBuffer> renderTarget, ::std::shared_ptr<SwapchainBuffer> buffer) 
+		{
+			BarrierContext::Transition(renderTarget, ResourceCurrentStage::Copy);
+			BarrierContext::m_Barriers.emplace_back(Utils::ResourceBarrier(*buffer, ::D3D12_RESOURCE_STATE_PRESENT, ::D3D12_RESOURCE_STATE_RESOLVE_DEST));
+			FlushBarriers();
+
+			m_CommandList->ResolveSubresource(*buffer, 0u, *renderTarget->BackingResource(), renderTarget->ResourcePosition().SubresourceIndex, ::DXGI_FORMAT_R8G8B8A8_UNORM);
+
+			BarrierContext::Transition(renderTarget, ResourceCurrentStage::Idle);
+			BarrierContext::m_Barriers.emplace_back(Utils::ResourceBarrier(*buffer, ::D3D12_RESOURCE_STATE_RESOLVE_DEST, ::D3D12_RESOURCE_STATE_PRESENT));
+			FlushBarriers();
+		}
+
+		// Implicit transition of resource state would take place on the render target and become idle state (...might be common).
+		// So we recommand you call the method on main thread before commit.
+		// @return represent the operation is completed.
+		bool Copy(::std::shared_ptr<RenderBuffer> renderTarget, IDXGISwapChain4* swapchain) noexcept(!D3D12_MODEL_DEBUG)
+		{
+			::ID3D12Resource* buffer{nullptr};
+			if (FAILED(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&buffer)))) 
+			{
+				if (buffer) buffer->Release();
+				return false;
+			}
+		#if D3D12_MODEL_DEBUG
+			auto&& desc = buffer->GetDesc();
+			// TODO: Would format be typeless?
+			if (desc.Format != renderTarget->BackingResource()->Desc.Format)
+				return false;
+		#endif
+
+			BarrierContext::Transition(renderTarget, ResourceCurrentStage::Copy);
+			BarrierContext::m_Barriers.emplace_back(Utils::ResourceBarrier(buffer, ::D3D12_RESOURCE_STATE_PRESENT, ::D3D12_RESOURCE_STATE_RESOLVE_DEST));
+			FlushBarriers();
+
+			m_CommandList->ResolveSubresource(buffer, 0u, *renderTarget->BackingResource(), renderTarget->ResourcePosition().SubresourceIndex, ::DXGI_FORMAT_R8G8B8A8_UNORM);
+
+			BarrierContext::Transition(renderTarget, ResourceCurrentStage::Idle);
+			BarrierContext::m_Barriers.emplace_back(Utils::ResourceBarrier(buffer, ::D3D12_RESOURCE_STATE_RESOLVE_DEST, ::D3D12_RESOURCE_STATE_PRESENT));
+			FlushBarriers();
+
+			buffer->Release();
+
+			return true;
+		}
+		// set vbo.
+		void Bind(::std::shared_ptr<VertexBuffer> vbo, ::UINT countOfSlot = 1u, ::UINT startSlot = 0u) 
+		{
+			MODEL_ASSERT(vbo->CanBind(), "vbo didnt init.");
+			MODEL_ASSERT(vbo->View().size(), "vbo havent be written.");
+
+			MODEL_ASSERT(vbo->Address() == vbo->View().front().BufferLocation, "Not from start.");
+
+			m_CommandList->IASetVertexBuffers(startSlot, countOfSlot, vbo->View().data() + startSlot);
+		}
+		// set ibo.
+		void Bind(::std::shared_ptr<IndexBuffer> ibo) 
+		{
+			MODEL_ASSERT(ibo->CanBind(), "ibo didnt init.");
+			m_CommandList->IASetIndexBuffer(&ibo->View());
+		}
+
+		// simply pack up.
+		struct DrawParameter 
+		{
+			::UINT VertexCountPerInstance;
+			::UINT InstanceCount              {1u};
+			::UINT StartVertexLocation        {0u};
+			::UINT StartInstanceLocation      {0u};
+			::D3D_PRIMITIVE_TOPOLOGY Topology {::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
+		};
+		// Instance count defualt at 1, Topology default at TRIANGLELIST.
+		//  |w|
+		// tips: You can invoke by one of following approach:
+		//  (1) (Context)->Draw({ .VertexCountPerInstance{ (Your index per instance count.) }, [.OtherParameter{ (value) }]... });
+		//  (2) (Context)->Draw({ (Your index per instance count.), [ (values) ... ]});
+		void Draw(DrawParameter const& parameter) const noexcept
+		{
+			m_CommandList->IASetPrimitiveTopology(parameter.Topology);
+			m_CommandList->DrawInstanced(parameter.VertexCountPerInstance, parameter.InstanceCount, 
+				parameter.StartVertexLocation, parameter.StartInstanceLocation);
+		}
+
+		// simply pack up.
+		struct DrawIndexParameter 
+		{
+			
+			::UINT IndexCountPerInstance{};
+			::UINT InstanceCount              {1u};
+			::UINT StartIndexLocation         {0u};
+			::INT BaseVertexLocation          {0u};
+			::UINT StartInstanceLocation      {0u};
+			::D3D_PRIMITIVE_TOPOLOGY Topology {::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
+		};
+		// Instance count defualt at 1, Topology default at TRIANGLELIST.
+		//  |w|
+		// tips: You can invoke by one of following approach:
+		//  (1) (Context)
+		//      ->DrawIndex({ .IndexCountPerInstance{ (Your index per instance count.) }, [.OtherParameter{ (value) }]... });
+		//  (2) (Context)->DrawIndex({ (Your index per instance count.), [(values ... )] })
+		void DrawIndex(DrawIndexParameter const& parameter) noexcept
+		{
+			m_CommandList->IASetPrimitiveTopology(parameter.Topology);
+			m_CommandList->DrawIndexedInstanced(parameter.IndexCountPerInstance, parameter.InstanceCount, 
+				parameter.StartIndexLocation, parameter.BaseVertexLocation, parameter.StartInstanceLocation);
+		}
+
+	private:
+		inner::Pointer<DescriptorHeap> m_DescriptorsRenderTarget{};
+		inner::Pointer<DescriptorHeap> m_DescriptorsDepthStencil{};
+	};
+	// General direct graphics context.
+	using DirectCommandContext = CommandContext::DirectCommandContext;
+
+	class CommandContext::CopyCommandContext
+		: public ContextCommon
+		, CopyContext<CopyCommandContext>
+		, BarrierContext<CopyCommandContext>
+	{
+		friend class CommandContext;
+	public:
+
+		TWEN_ISCA Type{ ::D3D12_COMMAND_LIST_TYPE_COPY };
+
+		using ContextCommon::ContextCommon;
+		using CopyContext::Copy;
+		using BarrierContext::Transition;
+
+	};
+	// General copy command context.
+	using CopyCommandContext = CommandContext::CopyCommandContext;
+
+	// Do not use currently.
+	class CommandContext::ComputeCommandContext 
+		: public ContextCommon
+		, BindableContext<ComputeCommandContext>
+	{
+		friend class CommandContext;
+	public:
+		TWEN_ISCA Type{ ::D3D12_COMMAND_LIST_TYPE_COMPUTE };
+
+		using BindableContext::Bind;
+
+	private:
+
+	};
+	// General compute command context. (NOT FINISHED).
+	using ComputeCommandContext = CommandContext::ComputeCommandContext;
+}
+
+namespace twen 
+{
+	template<typename Fn>
+	inline void CommandContext::ExecuteOnMain(/*Device* device,*/ Fn&& fn)
+		requires::std::invocable<Fn, CommandContext::DirectCommandContext*>
+	{
+
+		auto context = CreateNewContext<DirectCommandContext>(GetDevice());
+
+		fn(context);
+
+		static_cast<ContextCommon*>(context)->m_CommandList->Close();
+
+		m_ActiveContexts.emplace_back(context);
+		m_Payloads[DirectCommandContext::Type].emplace_back(static_cast<ContextCommon*>(context)->m_CommandList);
+	}
+
+	template<typename Fn>
+	inline void CommandContext::ExecuteOnBatch(/*Device* device,*/ Fn&& fn) requires
+		::std::invocable<Fn, typename CommandContext::CopyCommandContext*>   ||
+		::std::invocable<Fn, typename CommandContext::ComputeCommandContext*>||
+		::std::invocable<Fn, typename CommandContext::DirectCommandContext*>
+	{
+
+		ContextCommon* commonContext;
+		if constexpr (::std::invocable<Fn, CopyCommandContext*>)
+		{
+			auto context = CreateNewContext<CopyCommandContext>(GetDevice());
+			fn(context);
+			commonContext = context;
+		} else if constexpr (::std::invocable<Fn, ComputeCommandContext*>) {
+			static_assert(!::std::invocable<Fn, ComputeCommandContext*>, "Compute context is not finished yet...");
+
+			auto context = CreateNewContext<ComputeCommandContext>(GetDevice());
+
+			fn(context);
+			commonContext = context;
+		} else {
+			auto context = CreateNewContext<DirectCommandContext>(GetDevice());
+
+			fn(context);
+			commonContext = context;
+		}
+
+		commonContext->m_CommandList->Close();
+
+		m_ActiveContexts.emplace_back(commonContext);
+		m_Payloads[CopyCommandContext::Type].emplace_back(commonContext->m_CommandList);
+	}
+
+	inline void CommandContext::Commit()
+	{
+		GetDevice().m_ResidencyManager->StorageResident();
+
+		for (auto& [type, state] : m_Payloads)
+		{
+			auto queue{ GetDevice().Queue(type) };
+			queue->AddPayloads(::std::move(state));
+			if (FAILED(queue->Wait(queue->Execute()))) 
+			{
+				MODEL_ASSERT(false, "Wait failure.");
+			}
+			m_Allocators.at(type)->Reset();
+		}
+
+		for (auto& activeContext : m_ActiveContexts) 
+		{
+			switch (activeContext->Type)
+			{
+			case D3D12_COMMAND_LIST_TYPE_DIRECT:
+				delete static_cast<DirectCommandContext*>(activeContext);
+				break;
+			case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+				delete static_cast<ComputeCommandContext*>(activeContext);
+				break;
+			case D3D12_COMMAND_LIST_TYPE_COPY:
+				delete static_cast<CopyCommandContext*>(activeContext);
+				break;
+			case D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE:
+				break;
+			case D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS:
+				break;
+			case D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE:
+			default: delete activeContext; break;
+			}
+		}
+		m_ActiveContexts.clear();
+
+		m_Payloads.clear();
+		if(m_States.size())
+			for (auto& [state, tracker] : m_States)
+			{
+				delete tracker;
+			}
+		m_States.clear();
+	}
 }

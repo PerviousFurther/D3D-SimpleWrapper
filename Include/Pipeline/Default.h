@@ -31,13 +31,44 @@ namespace twen
 				::UINT reg, ::UINT regSpace, ::D3D12_SHADER_VISIBILITY visibility, 
 				::D3D12_STATIC_BORDER_COLOR borderColor =::D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK) const
 			{ 
-				return{
+				return
+				{
 					desc.Filter, desc.AddressU, desc.AddressV, desc.AddressW,
 					desc.MipLODBias, desc.MaxAnisotropy, desc.ComparisonFunc,
 					borderColor, desc.MinLOD, desc.MaxLOD, reg, regSpace, visibility
 				};
 			}
-		} ToStatic;
+			inline constexpr::D3D12_SAMPLER_DESC operator()(::D3D12_STATIC_SAMPLER_DESC const& desc) 
+			{
+				::D3D12_SAMPLER_DESC result
+				{
+					desc.Filter,
+					desc.AddressU,
+					desc.AddressV,
+					desc.AddressW,
+					desc.MipLODBias,
+					desc.MaxAnisotropy,
+					desc.ComparisonFunc,
+					{},
+					desc.MinLOD,
+					desc.MaxLOD
+				};
+
+				switch (desc.BorderColor)
+				{
+				case::D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK:
+					result.BorderColor[3] = 1.0f;
+					break;
+				case::D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE:
+					::std::ranges::copy(::std::initializer_list{ 1.0f, 1.0f, 1.0f, 1.0f }, result.BorderColor);
+					break;
+				default:
+					break;
+				}
+
+				return result;
+			}
+		} Transform;
 	}
 
 	inline namespace RasterizerState

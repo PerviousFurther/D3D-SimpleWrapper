@@ -149,13 +149,13 @@ copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxil.dll" "$(OutDir)"</Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Include\Command\Indirect.hpp" />
+    <ClInclude Include="Include\d3d_simple.h" />
     <ClInclude Include="Include\Helper\Camera.hpp" />
-    <ClInclude Include="Include\Command\Commands.hpp" />
     <ClInclude Include="Include\Command\Context.h" />
     <ClInclude Include="Include\Command\Query.h" />
     <ClInclude Include="Include\Helper\MeshGenerator.hpp" />
-    <ClInclude Include="Include\Misc\Hash.hpp" />
-    <ClInclude Include="Include\Misc\ObjectSet.h" />
+    <ClInclude Include="Include\Misc\Traits.h" />
     <ClInclude Include="Include\Pipeline\Compiler.h" />
     <ClInclude Include="Include\Pipeline\Default.h" />
     <ClInclude Include="Include\Pipeline\Pipeline.h" />
@@ -163,33 +163,22 @@ copy "$(projectdir)Vendor\DXC\bin\$(platform)\dxil.dll" "$(OutDir)"</Command>
     <ClInclude Include="Include\Pipeline\Shader.hpp" />
     <ClInclude Include="Include\Resource\Allocator.hpp" />
     <ClInclude Include="Include\Resource\Bindable.hpp" />
-    <ClInclude Include="Include\Resource\Buffer.h" />
     <ClInclude Include="Include\Pipeline\Descriptor.h" />
-    <ClInclude Include="Include\Resource\RenderTarget.h" />
-    <ClInclude Include="Include\Resource\Sampler.h" />
-    <ClInclude Include="Include\Resource\ShaderResource.h" />
-    <ClInclude Include="Include\Resource\UnorderedAccess.h" />
+    <ClInclude Include="Include\Resource\ResourceAllocator.hpp" />
     <ClInclude Include="Include\System\Adapter.h" />
     <ClInclude Include="Include\System\Device.h" />
-    <ClInclude Include="Include\Misc\Debug.h" />
     <ClInclude Include="Include\Misc\Common.h" />
     <ClInclude Include="Include\mpch.h" />
-    <ClInclude Include="Include\d3d12model.h" />
     <ClInclude Include="Include\Resource\Heap.h" />
     <ClInclude Include="Include\Resource\Resource.h" />
     <ClInclude Include="Include\System\Residency.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Include\Command\Context.cpp" />
-    <ClCompile Include="Include\Misc\Common.cpp" />
-    <ClCompile Include="Include\Resource\Buffer.cpp" />
-    <ClCompile Include="Include\System\Adapter.cpp" />
     <ClCompile Include="Include\System\Device.cpp" />
     <ClCompile Include="Include\mpch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="Include\Resource\Heap.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

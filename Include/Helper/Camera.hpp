@@ -4,9 +4,7 @@
 
 namespace twen 
 {
-	template<typename T>
-	class ConstantBuffer;
-	inline namespace Constants 
+	namespace Constants 
 	{
 		inline static constexpr float pi = 3.1415926535f;
 	}
@@ -79,7 +77,7 @@ namespace twen
 	};
 #define MAKE_ROTATE_QUATERNION(axis)\
 { sin * axis.m128_f32[0], sin * axis.m128_f32[1], sin * axis.m128_f32[2], cos } 
-	// Fuck you microsoft. This world would only you can hide real part in vector tail.
+
 	inline void Camera::Yaw(float angle)
 	{
 		using namespace::DirectX;

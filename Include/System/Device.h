@@ -1,81 +1,189 @@
 #pragma once
 
-//#include "Resource\Allocator.hpp"
+#include <deque>
+#include <mutex>
 
-namespace twen 
+namespace twen
 {
-	class Resource;
+	namespace inner
+	{
+		template<typename R>
+		concept Allocable = requires(R resource)
+		{
+			{ resource.Size } -> ::std::integral;
+		} && 
+		(requires(R resource) { resource.Alignment; } || requires{ R::Alignment; });
+
+		template<typename Backing>
+		struct Allocator;
+
+		template<typename Backing>
+		struct DemandAllocator;
+
+		template<typename Backing>
+		struct BuddyAllocator;
+
+		template<typename Backing>
+		class SegmentAllocator;
+	}
+
+	namespace Views 
+	{
+		struct Resource;
+
+		template<typename View, typename Extension =::std::nullptr_t>
+		class Bindable;
+
+
+	}
+
+	class DescriptorHeap;
+	class QueryHeap;
 	class Heap;
 
-	class DescriptorSet;
-	class CommandContextSet;
-	class RootSignatureManager;
+	class Resource;
+	class CommittedResource;
+	class PlacedResource;
+	class ReservedResource;
+
+	namespace Commands 
+	{
+		struct CopyContext;
+		struct ComputeContext;
+		struct DirectContext;
+		struct BindingContext;
+	}
+
+	class CommandContext;
+
+	class RootSignature;
+
 	class ShaderManager;
+
+	class Pipeline;
+	class ComputePipelineState;
+	class GraphicsPipelineState;
 	class PipelineManager;
 
-	class Queue : public::std::enable_shared_from_this<Queue>, public DeviceChild
+	struct ShaderResourceView;
+	struct UnorderedAccessView;
+	struct ConstantBufferView;
+	struct SamplerView;
+
+	struct RenderTargetView;
+	struct DepthStencilView;
+
+	struct VertexBufferView;
+	struct IndexBufferView;
+
+}
+
+#include "Residency.h"
+
+namespace twen
+{
+	class Queue : public inner::ShareObject<Queue>, public inner::DeviceChild
 	{
 	public:
-		using sort_t =::D3D12_COMMAND_LIST_TYPE;
+		using sort_t = ::D3D12_COMMAND_LIST_TYPE;
 	public:
-		Queue(Device& device, ::D3D12_COMMAND_LIST_TYPE type, ::D3D12_COMMAND_QUEUE_PRIORITY priority,
-			::D3D12_COMMAND_QUEUE_FLAGS flags =::D3D12_COMMAND_QUEUE_FLAG_NONE);
+		Queue(Device& device, ::D3D12_COMMAND_LIST_TYPE type,
+			::UINT nodeMask,
+			::D3D12_COMMAND_QUEUE_PRIORITY priority = ::D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+			::D3D12_COMMAND_QUEUE_FLAGS flags = ::D3D12_COMMAND_QUEUE_FLAG_NONE);
 
-		//void AddPayloads(::std::unique_ptr<Context>&& context);
-		void AddPayloads(::std::shared_ptr<CommandContextSet> contexts);
-
-		//::ID3D12CommandAllocator* Allocator() const { return m_Allocator.get(); }
-		void Wait(::UINT64 value = 0ull);
+		void AddPayloads(::std::vector<::ID3D12CommandList*>&& contexts) 
+		{
+			::std::swap(m_Payloads, contexts);
+		}
+		HRESULT Wait(::UINT64 value = 0ull);
 		::UINT64 Execute();
-
+		operator::ID3D12CommandQueue* () const { return m_Handle.Get(); }
+	public:
 		const sort_t Type;
-
-		operator::ID3D12CommandQueue*() const { return m_Handle.Get(); }
 	private:
 		::std::vector<::ID3D12CommandList*> m_Payloads;
 
 		ComPtr<::ID3D12Fence> m_Fence;
 		::UINT64 m_LastTicket{ 0u };
 
-		//ComPtr<::ID3D12CommandAllocator>	m_Allocator;
 		ComPtr<::ID3D12CommandQueue>		m_Handle;
 	};
 	// Dangerous when occurs dead lock.
-	inline void Queue::Wait(::UINT64 value)
+	inline HRESULT Queue::Wait(::UINT64 value)
 	{
 		//assert(m_LastTicket && "Queue was never been executed.");
 		if (value)
 		{
 			if (m_Fence->GetCompletedValue() >= value)
-				return;
-			m_Fence->SetEventOnCompletion(value, nullptr);
-		} else m_Fence->SetEventOnCompletion(m_LastTicket, nullptr);
+				return S_OK;
+			return m_Fence->SetEventOnCompletion(value, nullptr);
+		}
+		else return m_Fence->SetEventOnCompletion(m_LastTicket, nullptr);
 	}
 
-	class Device : public SingleNodeObject
+}
+
+namespace twen
+{
+	struct DeviceDesc 
+	{
+		::UINT Index : 8;
+		::UINT NodeCount : 8;
+		::D3D_FEATURE_LEVEL FeatureLevel : 16;
+		
+		::D3D12_RESOURCE_BINDING_TIER TierResourceBinding : 4;
+		::D3D12_TILED_RESOURCES_TIER  TierTiledResource   : 4;
+		::D3D12_CROSS_NODE_SHARING_TIER TierCrossNode     : 4;
+		
+		bool SupportStandardSwizzleRowLayout : 1 {false};
+
+		bool ExpandComputeResourceState : 1 {false};
+	};
+
+	class Device 
+		: public inner::SingleNodeObject
 	{
 		friend class Adapter;
+		friend class CommandContext;
+
+		friend void UpdateResidency(Device& device, Residency::Resident* resident);
+
 	public:
-		static inline auto sm_DefualtHeapSize{ 1024 * 1024 * 10u };
-		static constexpr auto FeatureLevel{::D3D_FEATURE_LEVEL_12_0};
+		// Features testing to create device.
+		// when no feature was supportted will throw an exception.
+		TWEN_ISC::D3D_FEATURE_LEVEL Features[]
+		{
+			::D3D_FEATURE_LEVEL_12_2,
+			::D3D_FEATURE_LEVEL_12_1,
+			::D3D_FEATURE_LEVEL_12_0,
+		#if defined(D3D12_ALLOW_FEATURE_11_X)
+			::D3D_FEATURE_LEVEL_11_1,
+			::D3D_FEATURE_LEVEL_11_0,
+		#endif
+		};
+
+		// Set this value to change default heap size.
+		// Was limited by 4mb to 128mb.
+		static inline auto DefualtHeapSize{ 1024 * 1024 * 32u };
+
 	public:
-		Device(class Adapter& adapter);
-		Device();
+
+		Device(Adapter& parent, DeviceDesc const& desc, ComPtr<::ID3D12Device> device);
 
 		Device(Device const&) = delete;
-		Device& operator=(Device const&) = delete;
 
 		~Device();
+
 	public:
-		::ID3D12Device* operator->() const { return m_Device.Get(); }
+		// Obtain default descriptor manger.
+		inline auto DescriptorManager() const { return m_DescriptorManager; }
 
-		inline::std::shared_ptr<DescriptorSet> 
-			DescriptorSetOf(::D3D12_DESCRIPTOR_HEAP_TYPE type) const { return m_DescriptorSets.at(type); }
-		
-		inline auto QueueOf(::D3D12_COMMAND_LIST_TYPE type) { return m_MainQueues.at(type); }
+		// Obtain default queue.
+		inline auto Queue(::D3D12_COMMAND_LIST_TYPE type) { return m_MainQueues.at(type); }
 
-		inline::std::shared_ptr<CommandContextSet> 
-			CommandContextSetOf(::D3D12_COMMAND_LIST_TYPE type) const { return m_CommandSets.at(type); }
+		// Obtain default command context.
+		inline auto GetCommandContext() const { MODEL_ASSERT(m_Context, "Must call begin frame at first."); return m_Context; }
 
 		template<::D3D12_FEATURE Feature>
 		auto FeatureData(auto&&...args);
@@ -83,39 +191,97 @@ namespace twen
 		template<typename T>
 		bool IsFeatureSupport(T& featurData);
 
-		template<typename T, typename...Args>
-		inline::std::shared_ptr<T> Create(Args&&...args) 
-			requires::std::constructible_from<T, Device&, Args...>
-			|| ::std::constructible_from<T, Args...>
-		{ 
-			if constexpr(::std::constructible_from<T, Device&, Args...>)
-				return T::base_t::template Create<T>(*this, ::std::forward<Args>(args)...); 
-			else 
-				return T::base_t::template Create<T>(::std::forward<Args>(args)...); 
-		}
-		::std::string Message();
-	private:
-		void InitializeDeviceContext();
-		void InitDevice(::IDXGIAdapter* adapter);
-	private:
-		ComPtr<::ID3D12Device> m_Device;
+		// Dynamic version of creating resource view.
+		// DO NOT USE.
+		//::std::shared_ptr<Views::Resource> Create(Views::Type type, ResourceOrder const& order);
+
+		template<typename View>
+		auto Create(ResourceOrder&& order, ::std::string_view name) requires 
+			requires{ typename View::view; };
+
+		::UINT AllVisibleNode() const { return (1 << Desc.NodeCount) - 1; }
 		
-		::std::unordered_map<::D3D12_HEAP_TYPE, 
-			::std::shared_ptr<Heap>>					m_DefaultHeaps;
+		Adapter* SwitchToAdapter() const { return m_Adapter; }
 
-		::std::unordered_map<::D3D12_DESCRIPTOR_HEAP_TYPE,
-			::std::shared_ptr<DescriptorSet>>			m_DescriptorSets;
+		LARGE_INTEGER CreateTime() const;
 
-		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, ::std::shared_ptr<Queue>> 
-														m_MainQueues;
+		// Inner usage, do not invoke.
+		void UpdateResidency(const Residency::Resident* resident);
+		void Evict(const Residency::Resident* resident);
 
-		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, ::std::shared_ptr<CommandContextSet>>
-														m_CommandSets;
+		::D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT DeviceRemoveData() const noexcept;
 
+		::std::string Message();
+
+		::ID3D12Device* operator->() const { return m_Device; }
+		operator::ID3D12Device* () const { return m_Device; }
+
+		// Temporary, will be remove at soon.
+		template<typename T, typename...Args>
+		inline auto Create(Args&&...args)
+			noexcept(::std::is_nothrow_constructible_v<T, Args...> || ::std::is_nothrow_constructible_v<T, Device&, Args...>) requires
+		    ::std::constructible_from<T, Device&, Args...> // Must be constructable from args. 
+			||::std::constructible_from<T, Args...>
+		{
+			if constexpr (inner::congener<T, Residency::Resident>) 
+			{
+				auto resident = ::std::make_shared<T>(*this, ::std::forward<Args>(args)...);
+				m_ResidencyManager->AddResident(resident); // temporary.
+				return resident;
+			}
+			else if constexpr (requires(T r) { r.shared_from_this(); })
+			{
+				if constexpr (::std::constructible_from<T, Device&, Args...>)
+					return::std::make_shared<T>(*this, ::std::forward<Args>(args)...);
+				else
+					return::std::make_shared<T>(::std::forward<Args>(args)...);
+			} else {
+				if constexpr (::std::constructible_from<T, Device&, Args...>)
+					return::std::make_unique<T>(*this, ::std::forward<Args>(args)...);
+				else
+					return::std::make_unique<T>(::std::forward<Args>(args)...);
+			}
+		}
+	private:
+
+		void InitializeDeviceContext();
+
+
+	public:
+		// Contains neccessary info that can help 
+		// construct further operation.
+		const DeviceDesc Desc;
+	private:
+		Adapter* m_Adapter;
+
+		::ID3D12Device* m_Device;
 
 	#if D3D12_MODEL_DEBUG
 		ComPtr<::ID3D12InfoQueue> m_InfoQueue;
+		ComPtr<::ID3D12DeviceRemovedExtendedData> m_DeviceRemoveData;
 	#endif
+
+		// Listen all the resident request.
+		Residency::ResidencyManager* m_ResidencyManager;
+
+		// Device allocator.
+		friend struct ResourceAllocator;
+		struct ResourceAllocator* m_Allocator;
+
+		friend struct DescriptorManager;
+		struct DescriptorManager* m_DescriptorManager;
+
+		struct BindlessDescriptorManager;
+
+
+		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, 
+			::std::shared_ptr<class Queue>> m_MainQueues;
+
+		CommandContext* m_Context;
+
+		//::std::unordered_map<::D3D12_COMMAND_LIST_TYPE, 
+		//	::std::shared_ptr<class CommandContextSet>> m_CommandSets;
+
 	};
 
 	namespace inner 
@@ -153,4 +319,6 @@ namespace twen
 		constexpr auto enum_value = inner::FeatureDataToFeatureEnum<T>::value;
 		return SUCCEEDED(m_Device->CheckFeatureSupport(enum_value, &featureData, sizeof(T)));
 	}
+
+	::std::unique_ptr<Device> CreateDefaultDevice();
 }

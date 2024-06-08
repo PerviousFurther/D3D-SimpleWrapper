@@ -1,124 +1,188 @@
 #pragma once
 
-#include <queue>
-
-namespace twen 
-{
+namespace twen::inner
+{	
 	enum class AllocatorType
 	{
-		Unknown, Buddy, Bucket, Pool
+		Unknown, Buddy, Demand, Segment
 	};
 
-	//template<typename T, typename R>
-	//concept Allocator = requires(T t)
-	//{
-	//	{ t.Alloc(::UINT64{}) } -> ::std::convertible_to<Pointer<R>>;
-	//	t.Free(::std::declval<Pointer<R> const&>());
-	//};
-
+	// Allocator base interface, which offer method that can allocate resource with knowing it actual type.
 	template<typename R>
-	concept Allocable = requires(R resource)
-	{
-		{ resource.Size } -> ::std::integral;
-		{ resource.Alignment } -> ::std::integral;
-	};
-
-	// Use for warp type.
-	template<typename R>
-	struct Allocator
-	{
-		Allocator(AllocatorType type) : Type{ type } {}
-
-		template<template<typename T>typename AllocatorT>
-		AllocatorT<R>& As()& { assert(Type == AllocatorT<R>::Type && "Mismatching conversion."); return static_cast<AllocatorT<R>&>(*this); }
-		template<template<typename T>typename AllocatorT>
-		AllocatorT<R> const& As() const& { return static_cast<AllocatorT<R> const&>(*this); }
-
-		Pointer<R> Alloc(::UINT size);
-		void Free(Pointer<R> const& pointer);
-	private:
-		const AllocatorType Type;
-	};
-
-	template<typename RT>
-	class BuddyAllocator : Allocator<RT>
+	struct Allocator /*: Allocator<void>*/
 	{
 	public:
-		using Backing = RT;
 
-		struct Data
+		using backing_t = R;
+
+	protected:
+		struct AllocateInfo 
 		{
-			::UINT SizeOrder;
+			::UINT64 Offset;
+			::UINT64 Size;
+		};
+	private:
+
+		inline static auto Growing{0u};
+
+	protected:
+
+		Allocator(AllocatorType type, ::std::shared_ptr<R> backingRes) 
+			: Type{type}
+		#if D3D12_MODEL_DEBUG
+			, Size{backingRes->Size}
+		#endif
+			, m_Backing{backingRes->Address()}
+			, m_AvailbleSize{backingRes->Size}
+		{}
+
+		Allocator(AllocatorType type, inner::Pointer<R> position)
+			: Allocator<void>{ position.Backing.lock()->ResidentType }
+		#if D3D12_MODEL_DEBUG
+			, Size{ position.Size }
+		#endif
+			, m_AvailbleSize{position.Size}
+			, m_Backing{position}
+		{}
+
+		Allocator(Allocator const&) = delete;
+
+	public:
+		~Allocator() 
+		{
+			MODEL_ASSERT(m_Allocations.empty(), "All allocation must be free before deletion.");
+			MODEL_ASSERT(m_AvailbleSize == Size, "Memory leak.");
+
+			m_Backing.Fallback();
+		}
+
+		template<template<typename T>typename AllocatorT>
+		AllocatorT<R>& Rebind()& 
+		{ 
+			MODEL_ASSERT(Type == AllocatorT<R>::Type, "Mismatching conversion."); 
+			return static_cast<AllocatorT<R>&>(*this); 
+		}
+
+		bool Full()                   const { return m_AvailbleSize == 0u; }
+		bool Empty()                  const { return m_Backing.Size == m_AvailbleSize; }
+		bool HaveSpace(::UINT64 size) const { return size <= m_AvailbleSize; }
+
+		inner::Pointer<R> const& Location()	  const { return m_Backing; }
+
+		::std::shared_ptr<R> Resource() const { return m_Backing.Backing.lock(); }
+
+		auto Alloc(::UINT64 size);
+		void Free(inner::Pointer<R> const& pointer);
+
+	public:
+		//Allocator<void>* LastAllocator;
+
+		const AllocatorType Type;
+		const::UINT64 ID{ Growing++ };
+	protected:
+
+		inner::Pointer<R> m_Backing;
+
+		struct hash 
+		{
+			::std::size_t operator()(inner::Pointer<R> const& pointer) const
+			{
+				return::std::hash<::std::size_t>{}(pointer.Offset);
+			}
 		};
 
-		static constexpr auto Type{AllocatorType::Buddy};
-	public:
-		BuddyAllocator(::std::shared_ptr<RT> backing) 
-			: Allocator<RT>{ Type }
-			, m_Backing{ backing }
-			, AlignmentOrder{ static_cast<::UINT>(::std::countl_one(backing->Alignment)) }
-			, MaxOrder{ sizeof(backing->Size) * CHAR_BIT - ::std::countr_zero(backing->Size) }
-		{
-			assert(!(backing->Size & (backing->Size - 1u)) && "Size should be power of 2 to avoid debris.");
-			assert(!(backing->Alignment & (backing->Alignment - 1)) && "Alignment must be power of 2.");
+		::std::unordered_set<inner::Pointer<R>, hash> m_Allocations;
 
-			m_FreeList.resize(MaxOrder);
-			m_FreeList.at(MaxOrder - 1u).insert(0u);
+	#if D3D12_MODEL_DEBUG
+		::UINT64 Size;
+	#endif
+		::UINT64 m_AvailbleSize{};
+	};
+
+	// Buddy allocator.
+
+	template<typename Backing>
+	struct BuddyAllocator : Allocator<Backing>
+	{
+	public:
+		TWEN_ISCA Type{AllocatorType::Buddy};
+	public:
+
+		// Full allocate.
+		BuddyAllocator(::std::shared_ptr<Backing> res, ::UINT64 alignment)
+			: Allocator<Backing>{ Type, res }
+			, m_AlignmentOrder{ 63u - ::std::countl_zero(alignment) }
+		{ 
+			MODEL_ASSERT(!(alignment& (alignment - 1u)), "Alignment must be power of 2.");
+			UpdateSize(res->Size); 
 		}
+
+		// Full allocate.
+		BuddyAllocator(::std::shared_ptr<Backing> res)
+			: Allocator<Backing>{ Type, res }
+			, m_AlignmentOrder{ sizeof(res->Desc.Alignment) * CHAR_BIT - ::std::countl_zero(res->Desc.Alignment) - 1u }
+		{ UpdateSize(res->Size); }
+
+		// Sub allocate.
+		BuddyAllocator(inner::Pointer<Backing> const& position) 
+			: Allocator<Backing>{ Type, position }
+			, m_AlignmentOrder{ sizeof(position.Alignment) * CHAR_BIT - ::std::countl_zero(position.Alignment) - 1u }
+		{ UpdateSize(position.size); }
 
 		BuddyAllocator(const BuddyAllocator&) = delete;
 
-		void Clear() 
-		{
-			for (auto const& allocation : m_Allocations)
-				Free(allocation);
-		}
-		~BuddyAllocator() { Clear(); }
 	public:
-		// Even you express zero, it still return an allocation of alignment.
-		Pointer<Backing> Alloc(::UINT64 size)
+		typename Allocator<Backing>::AllocateInfo Alloc(::UINT64 size)
 		{
-			const auto alignment = AlignmentOrder;
-			auto order = SizeToOrder(size) >> alignment;
-			auto offset = Modify(order);
+			size = Utils::Align2(size, 1ull << m_AlignmentOrder, true);
+			auto order = SizeToOrder(size) - m_AlignmentOrder;
+			auto offset = Find(static_cast<::UINT>(order));
 
-			auto result = m_Allocations.emplace(m_Backing->AddressOf(offset << alignment, 1ull << order << alignment, *this));
-			return *result.first;
+			return { offset << m_AlignmentOrder, 1ull << order << m_AlignmentOrder};
 		}
 
-		template<typename UNFINISHED>
-		bool Realloc(Pointer<Backing>& pointer, ::UINT newSize);
-
-		// After free. The pointer should not be availble.
-		void Free(Pointer<Backing> const& pointer)
+		bool Realloc(inner::Pointer<Backing>& pointer, ::UINT newSize) 
 		{
-			assert(m_Allocations.contains(pointer) && "Allocation is not inside current allocator.");
-
-			Modify(static_cast<::UINT>(pointer.Size >> AlignmentOrder), static_cast<::UINT>(pointer.Offset >> AlignmentOrder));
-
-			m_Allocations.erase(pointer);
-
-			if constexpr (requires(Backing rt) { rt.DiscardAt(pointer); })
-				m_Backing->DiscardAt(pointer);
+			MODEL_ASSERT(false, "Not implemented.");
+			return false;
 		}
+
+		void Free(auto const& pointer)
+		{
+			Modify(SizeToOrder(pointer.Size) >> m_AlignmentOrder, pointer.Offset);
+		}
+
+		void UpdateSize(::UINT64 size) 
+		{
+			MODEL_ASSERT(!(size & (size - 1u)), "Size should be power of 2 to avoid debris.");
+
+			m_FreeList.clear();
+
+			auto maxOrder{ 64u - ::std::countl_zero(size) };
+			// We wont allocate block smaller that alignment
+			m_FreeList.resize(maxOrder - m_AlignmentOrder);
+			// Place start at biggest size block.
+			m_FreeList.at(maxOrder - 1u - m_AlignmentOrder).insert(0u);
+		}
+
 	private:
-		FORCEINLINE::UINT Modify(::UINT order)
+		// on alloc.
+		inline::UINT64 Find(::UINT order)
 		{
-			assert(order <= MaxOrder && "Buddy allocator overflow.");
+			MODEL_ASSERT(m_FreeList.size() > order, "Buddy allocator overflow.");
 
-			auto& set{ m_FreeList.at(order - 1u) };
-			auto offset{ 0u };
+			auto& set{ m_FreeList.at(order) };
+			auto offset{ 0ull };
 			if (set.empty())
 			{
-				// depart the block.
-				offset = Modify(order + 1u);
+				offset = Find(order + 1u);
 
+				// Depart the block into small one.
 				auto size = 1u << order;
 				auto newOffset = size + offset;
 
 				set.insert(newOffset);
-			}
-			else {
+			} else {
 				auto it = set.begin();
 
 				offset = *it;
@@ -128,10 +192,14 @@ namespace twen
 
 			return offset;
 		}
-		FORCEINLINE void Modify(::UINT order, ::UINT offset)
+		// on free.
+		inline void Modify(::UINT order, ::UINT64 offset)
 		{
 			auto block = 1 << order;
 			auto buddy = block ^ offset;
+
+			MODEL_ASSERT(m_FreeList.size() > order, "Out of range.");
+
 			auto& set{ m_FreeList.at(order) };
 			if (set.contains(buddy))
 			{
@@ -142,130 +210,321 @@ namespace twen
 				set.emplace(offset);
 		}
 
-		FORCEINLINE::UINT GetBuddy(::UINT offset, ::UINT order) const { return offset ^ order; }
+		inline static::UINT GetBuddy(::UINT offset, ::UINT order) { return offset ^ order; }
 
-		FORCEINLINE::UINT SizeToOrder(::UINT64 size) const
+		inline static::UINT SizeToOrder(::UINT64 size)
 		{
-			auto alignSize = Align(size, m_Backing->Alignment);
-			bool increase = (alignSize - 1u) & alignSize; // if power of 2, it is false.
-			return 64u - ::std::countl_zero(alignSize) + increase;
+			auto order = 63u - ::std::countl_zero(size);
+			return order + static_cast<bool>(size & (size - 1u));
 		}
-		FORCEINLINE::UINT64 OrderToSize(::UINT index)			const { return 1ull << index; }
-	public:
-		struct PointerHash
-		{
-			::std::uint64_t operator()(Pointer<RT> const& target) const
-			{ return::std::hash<::UINT64>{}(target.Offset); }
-		};
+		inline static::UINT64 OrderToSize(::UINT index) { return 1ull << index; }
 
-		const::UINT MaxOrder;
-		const::UINT AlignmentOrder;
 	private:
-		::std::vector<::std::unordered_set<::UINT>> m_FreeList;
-		::std::unordered_set<Pointer<RT>, PointerHash>	m_Allocations;
-
-		::std::shared_ptr<Backing> m_Backing;
+		::UINT64 m_AlignmentOrder;
+		::std::vector<::std::unordered_set<::UINT64>> m_FreeList;
 	};
 
-	// Unfinished.
-	/*template<typename RT>
-	struct BucketAllocator 
+	// Demand allocator.
+
+	template<typename Backing>
+	struct DemandAllocator 
+		: public Allocator<Backing>
 	{
 	public:
-		using Backing = RT;
+		TWEN_ISCA Type{AllocatorType::Demand};
 
-		struct Data 
+	public:
+
+		DemandAllocator(::std::shared_ptr<Backing> res)
+			: Allocator<Backing>{ Type, res }
+		{ UpdateSize(res->Size, res->Alignment); }
+
+		// Create as suballocation allocator part.
+		DemandAllocator(inner::Pointer<Backing> const& position) 
+			: Allocator<Backing>{ Type, position }
+		{ UpdateSize(position.Size, position.Alignment); }
+
+	public:
+
+		typename Allocator<Backing>::AllocateInfo Alloc(::UINT64 desiredSize)
 		{
+			// it is size map.
+			auto it = m_SizeMap.lower_bound(desiredSize);
+			if (it == m_SizeMap.end())
+			{
+				MODEL_ASSERT(false, "Cannot find availble block.");
+				return {};
+			}
+
+			MODEL_ASSERT(it->second.size(), "Offset set is empty.");
+
+			desiredSize = Utils::Align(desiredSize, Alignment, true);
+
+;			auto offsetIt = it->second.begin();
+			auto offset   = *offsetIt;
+			auto size     = it->first;
+			
+			m_OffsetMap.erase(offset);
+
+			it->second.erase(offsetIt);
+			if (it->second.empty()) 
+				m_SizeMap.erase(it);
+
+			AddNode(size - desiredSize, offset + desiredSize);
+			
+			return { offset, desiredSize };
+		}
+
+		bool Realloc(inner::Pointer<Backing>& pointer, ::UINT64 desiredSize)
+		{
+			MODEL_ASSERT(false, "Not implmented.");
+
+			return false;
+		}
+
+		void Free(inner::Pointer<Backing> const& pointer)
+		{
+			::UINT64 offset = pointer.Offset;
+			::UINT64 size = pointer.Size;
+
+			MODEL_ASSERT(!m_OffsetMap.contains(offset), "Wrong place.");
+
+			auto front = m_OffsetMap.lower_bound(offset);
+			auto back = m_OffsetMap.empty() ? m_OffsetMap.begin() : front--;
+			if (back != m_OffsetMap.end() && back->first == offset + size)
+			{
+				size += back->second;
+
+				// current size would contains in size map.
+				auto it = m_SizeMap.find(back->second);
+				MODEL_ASSERT(it != m_SizeMap.end(), "Unexcepted phenomenon in free.");
+
+				it->second.erase(back->first);
+				if (it->second.empty()) 
+					m_SizeMap.erase(it);
+
+				m_OffsetMap.erase(back);
+			}
+			if (front != m_OffsetMap.end() && front->first + front->second == offset)
+			{
+				offset = front->first;
+				size += front->second;
+
+				auto it = m_SizeMap.find(front->second);
+				MODEL_ASSERT(it != m_SizeMap.end(), "Unexcepted phenomenon in free.");
+
+				it->second.erase(front->first);
+				if (it->second.empty())
+					m_SizeMap.erase(it);
+
+				m_OffsetMap.erase(front);
+			}
+
+			AddNode(size, offset);
+		}
+
+		void UpdateSize(::UINT64 size, ::UINT64 alignment)
+		{
+			MODEL_ASSERT(!(size % alignment), "Must be aligned size.");
+			Alignment = alignment;
+
+			m_OffsetMap.emplace(0, size);
+			m_SizeMap.emplace(size, ::std::set<::UINT64>{});
+			m_SizeMap.at(size).emplace(0u);
+		}
+
+	private:
+
+		void AddNode(::UINT64 size, ::UINT64 offset) 
+		{
+			m_OffsetMap.emplace(offset, size);
+
+			if (auto it = m_SizeMap.find(size);
+				it != m_SizeMap.end())
+				it->second.emplace(offset);
+			else
+				m_SizeMap.emplace(size, ::std::set<::UINT64>{}).first->second.emplace(offset);
+		}
+
+	private:
+		::UINT64 Alignment{0u};
+		::std::map<::UINT64, ::UINT64> m_OffsetMap;
+		::std::map<::UINT64, ::std::set<::UINT64>> m_SizeMap;
+	};
+
+	// Segment allocator.
+
+	template<typename Backing>
+	class SegmentAllocator
+		: public Allocator<Backing>
+	{
+	public:
+		
+		TWEN_ISCA Type{ AllocatorType::Segment };
+
+	public:
+
+		SegmentAllocator(::std::shared_ptr<Backing> res, ::UINT chunkSize) 
+			: Allocator<Backing>{ AllocatorType::Segment, res }
+			, ChunkSize{ chunkSize }
+		{ UpdateSize(res->Size);}
+
+		SegmentAllocator(inner::Pointer<Backing> position, ::UINT chunkSize)
+			: Allocator<Backing>{ AllocatorType::Segment, position }
+			, ChunkSize{ chunkSize }
+		{ UpdateSize(position.Size); }
+
+	public: 
+
+		Allocator<Backing>::AllocateInfo Alloc(::UINT64 size)
+		{
+			if (m_FreeList.empty())
+				return {};
+			
+			auto it{ m_FreeList.end() - 1u };
+			auto offset = it->Pop(size);
+
+			if (it->Full(ChunkSize))
+			{
+				m_FullList.emplace(it->Index, ::std::move(*it));
+				m_FreeList.erase(it);
+			}
+
+			return {offset, ChunkSize};
+		}
+		void Free(inner::Pointer<Backing> const& pointer)
+		{
+			MODEL_ASSERT(false, "Not implemented yet.");
+
+			auto offset = pointer.Offset - m_Backing.Offset;
+			auto index = offset / ChunkSize;
+
+			auto it{ m_FullList.find(index) };
+			if (it != m_FullList.end()) 
+			{
+				auto&& [_, chunk]{*it};
+				chunk.Offsets.push(offset);
+				m_FreeList.insert(m_FreeList.begin() + index, ::std::move(chunk));
+				m_FullList.erase(it);
+			} else m_FreeList.at(index).Offsets.push(offset);
+		}
+		void UpdateSize(::UINT64 size) 
+		{
+			MODEL_ASSERT(!(size % ChunkSize), "Should be aligned to decrease wasting.");
+			MODEL_ASSERT(m_FullList.empty(), "Sth was not free.");
+			m_FreeList.clear();
+
+			auto count = size / ChunkSize;
+
+			m_FullList.reserve(count);
+			m_FreeList.resize(count);
+			for (auto i{ 0u }; auto& chunk : m_FreeList)
+				chunk.Index = i++;
+		}
+
+	public:
+
+		const::UINT64 ChunkSize;
+
+	private:
+		struct Chunk 
+		{
+			::UINT64 Pop(::UINT64 size)
+			{
+				if (Offsets.empty()) 
+				{
+					auto stub = Back;
+					Back += size;
+					return stub;
+				} else {
+					auto offset = Offsets.front();
+					Offsets.pop();
+					return offset;
+				}
+			}
+			bool Full(::UINT64 size) 
+			{
+				MODEL_ASSERT(size > Back, "Out of range in segment allocator.");
+				return Back == size;
+			}
+
 			::UINT Index;
-			::UINT Offset;
+			::UINT64 Back{0u};
+
+			::std::queue<::UINT64> Offsets{};
 		};
-
-		static constexpr auto MinResourceSize{ 64 * 1024ull };
-		static constexpr auto Type{AllocatorType::Bucket};
-	public:
-		BucketAllocator(::std::shared_ptr<Backing> backing, ::UINT64 retention)
-			: m_Backing{ backing }
-			, Retention{ retention }
-		{}
-
-		Pointer<RT> Alloc(::UINT64 size) 
-		{
-			assert(!"Not implmented");
-		}
-		void Free(Pointer<RT> const& pointer) 
-		{
-			auto const& stub = pointer.AllocatorStub;
-			assert(!"Not implmented");
-		}
-	public:
-		const::UINT64 Retention;
 	private:
-		struct PointerHash 
-		{
-			::std::size_t operator()(Pointer<RT> const& pointer) const 
-			{ return::std::hash<::std::size_t>{}(pointer.Offset); }
-		};
-
-		static constexpr auto Shift{6ull};
-		static constexpr auto NumBuckets{22ull};
-	private:
-		FORCEINLINE::UINT64 Modify(::UINT64 size)
-		{
-			auto bucket{ Bucket(size) };
-		}
-		FORCEINLINE void Modify(::UINT64 size, ::UINT64 index, ::UINT64 offset);
-
-		FORCEINLINE static::UINT64 BlockSize(::UINT64 bufferSize) 
-		{
-			constexpr auto min{ 1 << Shift };
-			return bufferSize <= min ? min : ::std::bit_ceil(bufferSize);
-		}
-		FORCEINLINE static::UINT64 Bucket(::UINT64 bufferSize) 
-		{
-			const::UINT64 bucket{ sizeof(::UINT64) * CHAR_BIT - ::std::countl_zero(bufferSize) + ((bufferSize & (bufferSize - 1u)) ? 1u : 0u) };
-			return bucket < Shift ? 0 : bucket - Shift;
-		}
-	private:
-		::std::queue<::UINT64> m_Availbles[NumBuckets]{};
-		::std::queue<::UINT64> m_Retried;
-		::std::unordered_set<Pointer<RT>, PointerHash>	m_Allocations;
-
-		::std::shared_ptr<Backing> m_Backing;
-	};*/
-
-	template<typename UNFINISHED>
-	class PoolAllocator
-	{};
+		using Allocator<Backing>::m_Backing;
+		::std::vector<Chunk> m_FreeList;
+		::std::unordered_map<::UINT64, Chunk> m_FullList;
+	};
 
 	template<typename R>
-	inline Pointer<R> Allocator<R>::Alloc(::UINT size)
+	struct Fallback
 	{
-		switch (Type)
-		{
-		case AllocatorType::Buddy:
-			return As<BuddyAllocator>().Alloc(size);
-		case AllocatorType::Bucket:
-			assert(!"Bucket allocator is not finished.");
-			return{};
-		case AllocatorType::Unknown:
-		default:assert(!"Should not access here."); return{};
-		}
+		void* Allocator;
+		void(*Deleter)(inner::Pointer<R> const*, void*);
+	};
+
+	template<typename R>
+	void FreeOnSingleAllocator(inner::Pointer<R> const* pointer, void* allocator)
+	{
+		MODEL_ASSERT(pointer && allocator, "Call on nullptr is invaild.");
+		static_cast<inner::Allocator<R>*>(allocator)->Free(*pointer);
 	}
 
 	template<typename R>
-	inline void Allocator<R>::Free(Pointer<R> const& pointer)
+	inline auto Allocator<R>::Alloc(::UINT64 size)
+	{
+		MODEL_ASSERT(m_AvailbleSize >= size, "No memory");
+
+		AllocateInfo info{};
+		switch (Type)
+		{
+		case AllocatorType::Buddy:
+			info = Rebind<BuddyAllocator>().Alloc(size);
+		break;
+		case AllocatorType::Demand:
+			info = Rebind<DemandAllocator>().Alloc(size);
+		break;
+		case AllocatorType::Segment:
+			info = Rebind<SegmentAllocator>().Alloc(size);
+		break;
+		case AllocatorType::Unknown: MODEL_ASSERT(false, "Unknown allocator type.");
+		}
+
+		auto p = m_Backing.Subrange(info.Offset, info.Size);
+
+		p.AllocateFrom = this;
+
+		auto [result, success] {m_Allocations.emplace(p)};
+		MODEL_ASSERT(success, "Emplace allocation failure.");
+		m_AvailbleSize -= info.Size;
+
+		return *result;
+	}
+
+	template<typename R>
+	inline void Allocator<R>::Free(inner::Pointer<R> const& pointer)
 	{
 		switch (Type)
 		{
 		case AllocatorType::Buddy:
-			As<BuddyAllocator>().Free(pointer);
-			return;
-		case AllocatorType::Bucket:
-			assert(!"Bucket allocator is not finished.");
-			return;
-		case AllocatorType::Unknown:
-		default:assert(!"Should not access here."); return;
+			Rebind<BuddyAllocator>().Free(pointer);
+			break;
+		case AllocatorType::Segment:
+			Rebind<SegmentAllocator>().Free(pointer);
+			break;
+		case AllocatorType::Demand:
+			Rebind<DemandAllocator>().Free(pointer);
+			break;
+		case AllocatorType::Unknown: MODEL_ASSERT(false, "Unknown allocator type.");
 		}
+
+		MODEL_ASSERT(m_Allocations.contains(pointer), "Must allocate from.");
+
+		m_AvailbleSize += pointer.Size;
+		m_Allocations.erase(pointer);
 	}
 
 }

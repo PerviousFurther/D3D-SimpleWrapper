@@ -1,57 +1,204 @@
 #include "mpch.h"
 
+
+#include "System\Residency.h"
 #include "System\Adapter.h"
 #include "System\Device.h"
-#include "Misc\Common.h"
 
-#include "Resource\Buffer.h"
-#include "Resource\ShaderResource.h"
-#include "Resource\UnorderedAccess.h"
+#include "Resource\Resource.h"
+#include "Resource\ResourceAllocator.hpp"
+#include "Resource\Bindable.hpp"
 
 #include "Pipeline\Default.h"
 #include "Pipeline\Descriptor.h"
-#include "Pipeline\RootSignature.h"
 #include "Pipeline\Pipeline.h"
 
-#include "Misc\Hash.hpp"
+#include "Command\Query.h"
 #include "Command\Context.h"
 
 
+namespace twen::Debug 
+{
+	static::std::wstring DebugName{L"Unknown"};
 
-#if D3D12_MODEL_DEBUG
-	::twen::ComPtr<::ID3D12Debug5> D3D12Debug;
-#endif
+	void Name(::std::wstring_view name) 
+	{
+		DebugName = name;
+	}
+	::std::wstring_view Name() 
+	{
+		return DebugName;
+	}
+}
+
+namespace twen::Residency
+{
+	::ID3D12Pageable* Resident::Pageable() const
+	{
+		switch (ResidentType)
+		{
+		case resident::Resource:
+			return *static_cast<const Resource*>(this);
+
+		case resident::DescriptorHeap:
+			return *static_cast<const DescriptorHeap*>(this);
+
+		case resident::PipelineState:
+			return *static_cast<const Pipeline*>(this);
+
+		case resident::QueryHeap:
+			return *static_cast<const QueryHeap*>(this);
+
+		case resident::Heap:
+			return *static_cast<const Heap*>(this);
+
+		default:return nullptr;
+		}
+	}
+
+}
 
 namespace twen
 {
-	Device::Device(Adapter& adapter) : SingleNodeObject{0u}
+	// Create device.
+	Device* Adapter::CreateDevice()
 	{
-		adapter.m_Device = this;
+		MODEL_ASSERT(!m_Device, "Should not call when device has initialized.");
 
-		InitDevice(adapter.m_Adapter.Get());
-		auto node = m_Device->GetNodeCount();
-		InitializeDeviceContext();
+	#if D3D12_MODEL_DEBUG
+		static::std::once_flag flag;
+		auto call = []
+			{
+				ComPtr<::ID3D12Debug> debug;
+				D3D12GetDebugInterface(IID_PPV_ARGS(debug.Put()));
+				MODEL_ASSERT(debug, "GetDebuginterface failure.");
+				debug->EnableDebugLayer();
+			};
+		::std::call_once(flag, call);
+	#endif
+
+		ComPtr<::ID3D12Device> device;
+		if (Desc.MaxSupportFeature == 0xff) 
+		{
+			Desc.MaxSupportFeature = 0u;
+
+			while(FAILED(::D3D12CreateDevice(m_Adapter3.Get(), Device::Features[Desc.MaxSupportFeature], IID_PPV_ARGS(device.Put()))))
+			{
+				Desc.MaxSupportFeature++;
+				if (Desc.MaxSupportFeature > _countof(Device::Features)) 
+					throw::std::exception("Adapter not support d3d12.");
+			}
+		}
+
+		::D3D12_FEATURE_DATA_D3D12_OPTIONS option;
+		device->CheckFeatureSupport(::D3D12_FEATURE_D3D12_OPTIONS, &option, sizeof(option));
+
+		::D3D12_FEATURE_DATA_D3D12_OPTIONS1 option1;
+		device->CheckFeatureSupport(::D3D12_FEATURE_D3D12_OPTIONS1, &option1, sizeof(option1));
+
+		m_Device = ::std::make_unique<Device>
+		(
+			*this,
+			DeviceDesc
+			{
+			  Desc.Index
+			, device->GetNodeCount()
+			, Device::Features[Desc.MaxSupportFeature]
+			, option.ResourceBindingTier
+			, option.TiledResourcesTier
+			, option.CrossNodeSharingTier
+			, static_cast<bool>(option.StandardSwizzle64KBSupported)
+			, static_cast<bool>(option1.ExpandedComputeResourceStates)
+			}
+			, device
+		);
+		return m_Device.get();
 	}
+}
 
-	Device::Device() : SingleNodeObject{0u}
+namespace twen
+{
+
+	Device::Device(Adapter& parent, DeviceDesc const& desc, ComPtr<ID3D12Device> device)
+		: inner::SingleNodeObject{ 0u } // temporary.
+		, m_Adapter{ &parent }
+		, m_Device{ device.Get() }
+		, Desc{ desc }
+	#if D3D12_MODEL_DEBUG
+		, m_InfoQueue{ device.As<::ID3D12InfoQueue>() }
+		, m_DeviceRemoveData{ device.As<::ID3D12DeviceRemovedExtendedData>() }
+	#endif
+		, m_ResidencyManager{ new Residency::ResidencyManager{ *this } }
+		, m_DescriptorManager{ new (struct DescriptorManager){ *this, 16, 16, 128, 64 } }
+		, m_Allocator{ new ::twen::ResourceAllocator{*this, 1024u * 1024u, 65536u, 2u, ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT} }
+		, m_Context{ new CommandContext{ *this } }
 	{
-		InitDevice(nullptr);
+		device->AddRef();
+
+		MODEL_ASSERT(m_InfoQueue, "Not support info queue.");
+		MODEL_ASSERT(m_DeviceRemoveData, "Not support device remove data.");
+
+		::QueryPerformanceCounter(&m_ResidencyManager->m_InitTimeStamp);
+
 		InitializeDeviceContext();
 	}
 
 	Device::~Device()
 	{
-		ReportLivingObject();
+		m_ResidencyManager->EvictAll();
+
+		delete m_Context;
+		delete m_DescriptorManager;
+
+		m_Allocator->CleanUp();
+		delete m_Allocator;
+		delete m_ResidencyManager;
+
+		m_Device->Release();
+	}
+
+	void Device::InitializeDeviceContext()
+	{
+		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_DIRECT,
+			Create<class Queue>(::D3D12_COMMAND_LIST_TYPE_DIRECT, AllVisibleNode()));
+		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_COPY,
+			Create<class Queue>(::D3D12_COMMAND_LIST_TYPE_COPY, AllVisibleNode()));
+		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_COMPUTE,
+			Create<class Queue>(::D3D12_COMMAND_LIST_TYPE_COMPUTE, AllVisibleNode()));
+	}
+
+	void Device::UpdateResidency(const Residency::Resident* resident)
+	{
+		MODEL_ASSERT(m_ResidencyManager->m_CurrentResidencySet, "Havent begun resident recording.");
+		MODEL_ASSERT(resident, "Resident is empty.");
+
+		m_ResidencyManager->m_CurrentResidencySet->ReferencedResident.emplace(resident);
+	}
+
+	void Device::Evict(const Residency::Resident* resident)
+	{
+		m_ResidencyManager->DeleteObject(resident);
+	}
+
+	::D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT Device::DeviceRemoveData() const noexcept
+	{
+		if (m_DeviceRemoveData)
+		{
+			::D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT output;
+			m_DeviceRemoveData->GetAutoBreadcrumbsOutput(&output);
+			return output;
+		}
+		else return {};
 	}
 
 	::std::string Device::Message()
 	{
 		::std::string result;
-	#if D3D12_MODEL_DEBUG
+#if D3D12_MODEL_DEBUG
 		auto num = m_InfoQueue->GetNumStoredMessages();
-		if (num) 
+		if (num)
 		{
-			for (auto i{ 0u }; i < num; ++i) 
+			for (auto i{ 0u }; i < num; ++i)
 			{
 				SIZE_T size;
 				m_InfoQueue->GetMessage(i, nullptr, &size);
@@ -66,82 +213,25 @@ namespace twen
 			}
 			m_InfoQueue->ClearStoredMessages();
 		}
-	#endif 
+#endif 
 		return result;
 	}
+}
 
-	void Device::InitializeDeviceContext()
-	{
-		m_DefaultHeaps.emplace(::D3D12_HEAP_TYPE_DEFAULT, Heap::Create(*this, ::D3D12_HEAP_TYPE_DEFAULT, sm_DefualtHeapSize));
-		m_DefaultHeaps.emplace(::D3D12_HEAP_TYPE_UPLOAD, Heap::Create(*this, ::D3D12_HEAP_TYPE_UPLOAD, sm_DefualtHeapSize));
-		m_DefaultHeaps.emplace(::D3D12_HEAP_TYPE_READBACK, Heap::Create(*this, ::D3D12_HEAP_TYPE_UPLOAD, sm_DefualtHeapSize));
-
-		m_DescriptorSets.emplace(::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-			DescriptorSet::Create(*this, ::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				128u, ::D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE));
-		m_DescriptorSets.emplace(::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-			DescriptorSet::Create(*this, ::D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-				128u, ::D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE));
-		m_DescriptorSets.emplace(::D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-			DescriptorSet::Create(*this, ::D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 12u));
-		m_DescriptorSets.emplace(::D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
-			DescriptorSet::Create(*this, ::D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 6u));
-
-		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_DIRECT,
-			::std::make_shared<Queue>(*this, ::D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL));
-		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_COPY,
-			::std::make_shared<Queue>(*this, ::D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL));
-
-		m_CommandSets.emplace(::D3D12_COMMAND_LIST_TYPE_DIRECT,
-			::std::make_shared<CommandContextSet>(*this, ::D3D12_COMMAND_LIST_TYPE_DIRECT));
-		m_CommandSets.emplace(::D3D12_COMMAND_LIST_TYPE_COPY,
-			::std::make_shared<CommandContextSet>(*this, ::D3D12_COMMAND_LIST_TYPE_COPY));
-		m_CommandSets.emplace(::D3D12_COMMAND_LIST_TYPE_COMPUTE,
-			::std::make_shared<CommandContextSet>(*this, ::D3D12_COMMAND_LIST_TYPE_COMPUTE));
-	}
-
-	void Device::InitDevice(::IDXGIAdapter* adapter)
-	{
-	#if D3D12_MODEL_DEBUG
-		::D3D12GetDebugInterface(IID_PPV_ARGS(D3D12Debug.Put()));
-		assert(D3D12Debug.Get() && "Initialize d3d12debug failure.");
-		D3D12Debug->EnableDebugLayer();
-	#endif
-
-		::D3D12CreateDevice(adapter, FeatureLevel, IID_PPV_ARGS(m_Device.Put()));
-		assert(m_Device && "Create device failure");
-
-	#if D3D12_MODEL_DEBUG
-		m_InfoQueue = m_Device.As<ID3D12InfoQueue>();
-		assert(m_InfoQueue.Get() && "Initialize d3d12infoqueue failure.");
-	#endif
-	}
-
-	Queue::Queue(Device& device, ::D3D12_COMMAND_LIST_TYPE type, ::D3D12_COMMAND_QUEUE_PRIORITY priority, 
+namespace twen 
+{
+	Queue::Queue(Device& device, ::D3D12_COMMAND_LIST_TYPE type, 
+		::UINT nodeMask,
+		::D3D12_COMMAND_QUEUE_PRIORITY priority, 
 		::D3D12_COMMAND_QUEUE_FLAGS flags)
-		: DeviceChild{device}, Type{type}
+		: inner::DeviceChild{device}, Type{type}
 	{
-		::D3D12_COMMAND_QUEUE_DESC desc{ type, priority, flags, device.NativeMask };
+		::D3D12_COMMAND_QUEUE_DESC desc{ type, priority, flags, nodeMask };
 		device->CreateCommandQueue(&desc, IID_PPV_ARGS(m_Handle.Put()));
 		assert(m_Handle && "Creating queue failure.");
 
 		device->CreateFence(0ull, ::D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_Fence.Put()));
 		assert(m_Fence && "Creating fence failure.");
-
-		//device->CreateCommandAllocator(type, IID_PPV_ARGS(m_Allocator.Put()));
-	}
-
-	void Queue::AddPayloads(::std::shared_ptr<CommandContextSet> contexts)
-	{ 
-		assert(contexts->Type == Type && "Command context must in same type with queue.");
-		assert(contexts->m_ExecutionQueue.expired() && "Command context is already on executing.");
-
-		m_Payloads.append_range(::std::move(contexts->m_Payloads));
-		contexts->m_Payloads.clear();
-
-		contexts->m_LastTicket = m_LastTicket++; // i dont know it's safe or not. Ideally there is no any extra execution.
-		contexts->m_ExecutionQueue = weak_from_this();
-		contexts->Submitted = true;
 	}
 
 	::UINT64 Queue::Execute()

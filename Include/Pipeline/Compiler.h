@@ -1,27 +1,7 @@
 #pragma once
 
-#include <dxcapi.h>
-#pragma comment(lib, "dxcompiler.lib")
-#include <d3d12shader.h>
+#include <..\Vendor\DXC\inc\dxcapi.h>
 
-//namespace core 
-//{
-//	using shader_binding_t =::D3D12_SHADER_BYTECODE(::D3D12_GRAPHICS_PIPELINE_STATE_DESC::*);
-//
-//	static inline shader_binding_t ShaderTypeToBinding(D3D12_SHADER_VERSION_TYPE type)
-//	{
-//		switch (type)
-//		{
-//		case D3D12_SHVER_PIXEL_SHADER: return PIPE_SHADER_CODE(PS);
-//		case D3D12_SHVER_VERTEX_SHADER: return PIPE_SHADER_CODE(VS);
-//		case D3D12_SHVER_GEOMETRY_SHADER: return PIPE_SHADER_CODE(GS);
-//		case D3D12_SHVER_HULL_SHADER: return PIPE_SHADER_CODE(HS);
-//		case D3D12_SHVER_DOMAIN_SHADER: return PIPE_SHADER_CODE(DS);
-//		default:assert(!"Unknown shader type or try expressing compute shader type to get graphics shader binding.");
-//			return nullptr;
-//		}
-//	}
-//
 namespace twen::Compilers
 {
 	// Consume an file is an pipeline, thus every entry point name is fixed.
@@ -107,39 +87,44 @@ return *this
 			m_RequiresKind.emplace(DXC_OUT_PDB);
 		#endif
 		}
-		HRESULT Read(::std::wstring_view path) 
+		HRESULT Write(::std::wstring_view path) 
 		{
 			m_Status = m_Utils->LoadFile(path.data(), nullptr, m_FileBlob.Put());
 			return m_Status;
 		}
 	public:
-		FORCEINLINE ShaderCompiler& AddKind(::DXC_OUT_KIND kind) 
+		inline ShaderCompiler& AddKind(::DXC_OUT_KIND kind) 
 		{
 			m_RequiresKind.emplace(kind);
 			return *this;
 		}
-		FORCEINLINE ShaderCompiler& Vaildation(bool enable)
+		inline ShaderCompiler& Vaildation(bool enable)
 		{
 			APPEND_SETTING(!enable, s_DisableValidation);
 		}
-		FORCEINLINE ShaderCompiler& Macro(::std::wstring_view macro)
+		inline ShaderCompiler& Macro(::std::wstring_view macro)
 		{
 			APPEND_PARAM(macro.empty(), s_KeyMacro, macro);
 		}
-		FORCEINLINE ShaderCompiler& HlslVersion(::std::wstring_view version)
+		inline ShaderCompiler& HlslVersion(::std::wstring_view version)
 		{
 			assert(version.find(L"[a-zA-Z]") == version.npos && "");
 			APPEND_PARAM(version.empty(), s_KeyHlslVersion, version);
 		}
-		FORCEINLINE ShaderCompiler& Optimize(bool enable) 
+		inline ShaderCompiler& Optimize(bool enable) 
 		{
 			APPEND_SETTING(!enable, s_DisableOptimize);
 		}
 		// Express nullptr to use default include handler.
-		FORCEINLINE auto& Include(ComPtr<::IDxcIncludeHandler> const& handler) 
+		inline auto& Include(ComPtr<::IDxcIncludeHandler> const& handler) 
 		{
 			if (handler) m_Include = handler;
 			else m_Utils->CreateDefaultIncludeHandler(m_Include.Put());
+			return *this;
+		}
+		inline auto& EntryName(::std::wstring_view name) 
+		{
+			m_EntryName = name;
 			return *this;
 		}
 		ShaderCompiler& MatrixRowMajor(bool enable);
@@ -165,6 +150,8 @@ return *this
 
 		ComPtr<::IDxcBlobEncoding> m_FileBlob;
 		ComPtr<::IDxcIncludeHandler> m_Include;
+
+		::std::wstring m_EntryName{};
 
 		::std::unordered_set<::std::wstring_view> m_Settings;
 		::std::unordered_map<::std::wstring_view, ::std::wstring> m_Parameters;
@@ -215,16 +202,25 @@ return *this
 	{
 		::std::vector<LPCWSTR> params(m_Parameters.size() * 2u + m_Settings.size() + 4u);
 		auto targetName = ShaderTypeLowerCase(type) + L"_6_1";
+		//
+		// Start push compile option.
+		//
+		auto it = params.begin(); 
+		// Add compile target.
+		*it++ = s_KeyTarget, *it++ = targetName.data();
+		// Add entry point name
+		*it++ = s_KeyEntryName, *it++ = m_EntryName.empty() ? ShaderTypeToEntryName(type) : m_EntryName.data();
+		// Add optional parameter.
+		for (auto const& [key, param] : m_Parameters)
+			*it++ = key.data(), *it++ = param.data();
+		for (auto const& setting : m_Settings)
+			*it++ = setting.data();
 
-		auto it = params.begin();						*it++ = s_KeyTarget, *it++ = targetName.data();
-														*it++ = s_KeyEntryName, *it++ = ShaderTypeToEntryName(type);
-		for (auto const& [key, param] : m_Parameters)	*it++ = key.data(), *it++ = param.data();
-		for (auto const& setting : m_Settings)			*it++ = setting.data();
-		assert(it == params.end());
+		MODEL_ASSERT(it == params.end(), "Omitted some value.");
 
 		::BOOL knownCodePage{ false };
 		::UINT codePage{ DXC_CP_ACP };
-		m_FileBlob->GetEncoding(&knownCodePage, &codePage);
+		m_FileBlob->GetEncoding(&knownCodePage, &codePage); // obtain code page.
 
 		ComPtr<::IDxcResult> result;
 		DxcBuffer buffer{ m_FileBlob->GetBufferPointer(), m_FileBlob->GetBufferSize(), codePage };
@@ -234,14 +230,16 @@ return *this
 		result->GetStatus(&m_Status);
 		FAILED_LAMBDA(result);
 
+		// Obtain result so we can talk about it.
 		::std::unordered_map<::DXC_OUT_KIND, ComPtr<::IDxcBlob>> ret;
 		for (auto const& kind : m_RequiresKind) 
 			if (result->HasOutput(kind))
 				ret.emplace(kind, GetResult(kind, result, nullptr));
-			else { assert(!"Requires kind have no output."); }
+			else { MODEL_ASSERT(false, "Requires kind have no output."); }
 
 		auto &blob = ret.at(::DXC_OUT_OBJECT);
-
+		
+		// Dont forget to vaildate.
 		ComPtr<::IDxcOperationResult> vaildateResult;
 		m_Validator->Validate(blob.Get(), DxcValidatorFlags_Default, vaildateResult.Put());
 
@@ -250,6 +248,7 @@ return *this
 
 		return ret;
 	}
+
 #undef FAILED_LAMBDA
 
 	template<typename T>
