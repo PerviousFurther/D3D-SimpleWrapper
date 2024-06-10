@@ -574,9 +574,11 @@ namespace twen
 	{
 	public:
 		// will add reference count of swapchain.
-		SwapchainBuffer(ComPtr<::IDXGISwapChain4> swapchain)
+		SwapchainBuffer(::IDXGISwapChain4* swapchain)
 			: m_Swapchain{swapchain}
 		{
+			swapchain->AddRef();
+
 			::DXGI_SWAP_CHAIN_DESC1 desc;
 			m_Swapchain->GetDesc1(&desc);
 			m_Resources.resize(desc.BufferCount);
@@ -593,6 +595,7 @@ namespace twen
 
 		~SwapchainBuffer() 
 		{
+			m_Swapchain->Release();
 			for (auto& resource : m_Resources)
 				resource->Release();
 		}
@@ -606,7 +609,7 @@ namespace twen
 		}
 	private:
 
-		ComPtr<::IDXGISwapChain4> m_Swapchain;
+		::IDXGISwapChain4* m_Swapchain;
 
 		::std::vector<::ID3D12Resource*> m_Resources;
 	};

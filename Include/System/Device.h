@@ -33,8 +33,6 @@ namespace twen
 
 		template<typename View, typename Extension =::std::nullptr_t>
 		class Bindable;
-
-
 	}
 
 	class DescriptorHeap;
@@ -46,17 +44,10 @@ namespace twen
 	class PlacedResource;
 	class ReservedResource;
 
-	namespace Commands 
-	{
-		struct CopyContext;
-		struct ComputeContext;
-		struct DirectContext;
-		struct BindingContext;
-	}
-
 	class CommandContext;
 
 	class RootSignature;
+	class RootSignatureManager;
 
 	class ShaderManager;
 
@@ -64,18 +55,6 @@ namespace twen
 	class ComputePipelineState;
 	class GraphicsPipelineState;
 	class PipelineManager;
-
-	struct ShaderResourceView;
-	struct UnorderedAccessView;
-	struct ConstantBufferView;
-	struct SamplerView;
-
-	struct RenderTargetView;
-	struct DepthStencilView;
-
-	struct VertexBufferView;
-	struct IndexBufferView;
-
 }
 
 #include "Residency.h"
