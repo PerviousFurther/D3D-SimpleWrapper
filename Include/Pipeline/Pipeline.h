@@ -33,7 +33,7 @@ TWEN_EXPORT namespace twen
 	}
 }
 
-namespace twen
+namespace twen::inner
 {
 	struct BlendDesc
 	{
@@ -64,33 +64,49 @@ namespace twen
 		::D3D12_CONSERVATIVE_RASTERIZATION_MODE ConservativeRaster;
 	};
 
-	struct GraphicsPipelineBuilder : ::D3D12_GRAPHICS_PIPELINE_STATE_DESC
+	class GraphicsPipelineBuilder : private::D3D12_GRAPHICS_PIPELINE_STATE_DESC
 	{
 		using base_t = ::D3D12_GRAPHICS_PIPELINE_STATE_DESC;
 
-		GraphicsPipelineBuilder(RootSignature* rootsignature, ShaderNode* shaders)
+		friend class GraphicsPipelineState;
+	public:
+		GraphicsPipelineBuilder(RootSignature* rootsignature)
 			: base_t
 			{
 			.pRootSignature{*rootsignature},
 			.BlendState{.RenderTarget{{.RenderTargetWriteMask{0xff}}}},
 			.SampleMask{0xffffffff},
+			.RasterizerState
+				{ 
+				.FillMode{::D3D12_FILL_MODE_SOLID},
+				.CullMode{::D3D12_CULL_MODE_NONE}, 
+				},
 			.PrimitiveTopologyType{::D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE},
-			.SampleDesc{1u}
+			.SampleDesc{1u},
 			}
 			, EnableStreamOutput{ static_cast<bool>(rootsignature->Flags & ::D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT) }
 			, EnableInputAssembly{ static_cast<bool>(rootsignature->Flags & ::D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT) }
-		{
-			while (shaders)
-			{
-				shaders->Bytecode(*this);
-				shaders = shaders->Next();
-			}
-		}
+		{}
 
 		GraphicsPipelineBuilder(::ID3DBlob* cache)
 			: base_t{.CachedPSO{cache->GetBufferPointer(), cache->GetBufferSize()}}
 		{}
 
+		auto&& Shaders(ShaderNode* shaders) 
+		{
+			base_t::VS = {};
+			base_t::PS = {};
+			base_t::DS = {};
+			base_t::GS = {};
+			base_t::HS = {};
+
+			while (shaders)
+			{
+				shaders->Bytecode(*this);
+				shaders = shaders->Next();
+			}
+			return *this;
+		}
 		auto&& AlphaBlendState(BOOL alphaToCoverageEnable, BOOL independentBlendEnable)
 		{
 			BlendState.AlphaToCoverageEnable = alphaToCoverageEnable;
@@ -128,12 +144,12 @@ namespace twen
 			};
 			return *this;
 		}
-		auto&& RenderTargetState(::UINT index, ::UINT mask, ::DXGI_FORMAT format = ::DXGI_FORMAT_R8G8B8A8_UNORM)
+		auto&& RenderTargetState(::UINT index, ::D3D12_COLOR_WRITE_ENABLE color, ::DXGI_FORMAT format = ::DXGI_FORMAT_R8G8B8A8_UNORM)
 		{
 			MODEL_ASSERT(index < 8, "Out of range.");
 			NumRenderTargets = (::std::max)(NumRenderTargets, index + 1);
 
-			BlendState.RenderTarget[index].RenderTargetWriteMask = static_cast<::UINT8>(mask);
+			BlendState.RenderTarget[index].RenderTargetWriteMask = static_cast<::UINT8>(color);
 			base_t::RTVFormats[index] = format;
 			return *this;
 		}
@@ -224,13 +240,17 @@ namespace twen
 
 			return *this;
 		}
+		auto&& SetNodeMask(::UINT nodeMask) 
+		{
+			base_t::NodeMask = nodeMask;
 
-		::std::shared_ptr<GraphicsPipelineState> Generate(Device& device, ::UINT nodeMask = 0u);
+			return *this;
+		}
 
+		operator::D3D12_GRAPHICS_PIPELINE_STATE_DESC const* () const { return this; }
+	private:
 		bool EnableStreamOutput;
 		bool EnableInputAssembly;
-
-		::UINT NumRenderTargets{0u};
 
 		::std::vector<::D3D12_INPUT_ELEMENT_DESC> InputElements;
 		::std::vector<::D3D12_SO_DECLARATION_ENTRY> StreamOutputEntry;
@@ -246,69 +266,53 @@ namespace twen
 TWEN_EXPORT namespace twen
 {
 	class Pipeline
-		: public inner::ShareObject<Pipeline>
-		, public inner::DeviceChild
+		: public Residency::Resident
 		, public inner::MultiNodeObject
-		, public Residency::Resident
+		, public inner::ShareObject<Pipeline>
+		, public inner::DeviceChild
 	{
+	protected:
+		Pipeline(Device& device, ::UINT visibleNode, ID3D12PipelineState* state)
+			: inner::DeviceChild{ device }
+			, inner::MultiNodeObject{ visibleNode, device.NativeMask }
+			, Resident{ false, resident::PipelineState } // Move this '0u' after finish pipeline generator.
+			, m_Handle{ state }
+		{ Resident::Size = Cache()->GetBufferSize(); }
+
 	public:
 
-		ComPtr<::ID3DBlob> Cache() const;
+		Pipeline(Pipeline const&) = delete;
+		Pipeline& operator=(Pipeline const&) = delete;
 
-		::std::shared_ptr<RootSignature> EmbeddedRootSignature() const { return m_RootSignature; }
-		::std::shared_ptr<ShaderNode> Shaders() const { return m_Shaders; }
+		~Pipeline() { m_Handle->Release(); }
+
+		ComPtr<::ID3DBlob> Cache() const
+		{
+			ComPtr<::ID3DBlob> result;
+			m_Handle->GetCachedBlob(result.Put());
+			MODEL_ASSERT(result, "Get pipeline state's cache failure.");
+			return result;
+		}
 
 		operator::ID3D12PipelineState* () const
 		{
 			GetDevice().UpdateResidency(this);
-			return m_Handle.Get();
+			return m_Handle;
 		}
 	protected:
-		Pipeline(Device& device, ::std::shared_ptr<ShaderNode> chain, ::std::shared_ptr<RootSignature> rso, ::UINT visbleNode = 0u)
-			: inner::DeviceChild{ device }
-			, inner::MultiNodeObject{ visbleNode, device.NativeMask }
-			, Resident{ resident::PipelineState, 0u } // Move this '0u' after finish pipeline generator.
-		{
-
-			m_RootSignature = rso;
-		}
-	protected:
-		ComPtr<::ID3D12PipelineState> m_Handle;
-		::std::shared_ptr<RootSignature> m_RootSignature;
-		::std::shared_ptr<ShaderNode> m_Shaders;
+		::ID3D12PipelineState* m_Handle;
 	};
-	inline ComPtr<::ID3DBlob> Pipeline::Cache() const
-	{
-		ComPtr<::ID3DBlob> result;
-		m_Handle->GetCachedBlob(result.Put());
-		assert(result && "Get pipeline state's cache failure.");
-		return result;
-	}
-
 	// TODO: Seperate graphics pipeline desc into some pieces.
 	class GraphicsPipelineState
 		: public Pipeline
 	{
 	public:
-		// Create pipeline with existing rootsignature.
-		GraphicsPipelineState(Device& device, ::std::shared_ptr<VertexShader> shaders,
-			::std::shared_ptr<RootSignature> rso, ::D3D12_GRAPHICS_PIPELINE_STATE_DESC&& desc)
-			: Pipeline{ device, shaders, rso, desc.NodeMask }
-			, DepthEnable(desc.DepthStencilState.DepthEnable)
-			, StencilEnable(desc.DepthStencilState.StencilEnable)
-			, RenderTargetCount{ desc.NumRenderTargets }
-		{
-			ShaderNode* node{ shaders.get() };
-			while (node)
-			{
-				node->Bytecode(desc);
-				node = node->Next();
-			}
-			desc.pRootSignature = *m_RootSignature;
-
-			device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_Handle.Put()));
-			MODEL_ASSERT(m_Handle.Get(), "Create pipeline state failure.");
-		}
+		GraphicsPipelineState(Device& device, inner::GraphicsPipelineBuilder const& builder, ::ID3D12PipelineState* state) 
+			: Pipeline{device, builder.NodeMask, state}
+			, RenderTargetCount{builder.NumRenderTargets}
+			, DepthEnable{static_cast<bool>(builder.DepthStencilState.DepthEnable)}
+			, StencilEnable{static_cast<bool>(builder.DepthStencilState.StencilEnable)}
+		{}
 	public:
 		const::UINT RenderTargetCount : 4;
 		const bool DepthEnable : 1;
@@ -319,35 +323,53 @@ TWEN_EXPORT namespace twen
 		: public Pipeline
 	{
 	public:
-		ComputePipelineState(Device& device,
-			::std::shared_ptr<ComputeShader> cso,
-			::std::shared_ptr<RootSignature> rso = nullptr,
-			::UINT nodeMask = 0u)
-			: Pipeline{ device, cso, rso, nodeMask }
-		{
-			::D3D12_COMPUTE_PIPELINE_STATE_DESC desc
-			{ *m_RootSignature, cso->Bytecode(), nodeMask, {}, };
-			device->CreateComputePipelineState(&desc, IID_PPV_ARGS(m_Handle.Put()));
-
-			MODEL_ASSERT(m_Handle.Get(), "Create pipeline state failure.");
-		}
+		ComputePipelineState(Device& device, ::UINT nodeMask, ::ID3D12PipelineState* state)
+			: Pipeline{device, nodeMask, state} 
+		{}
 	};
 }
 
-namespace twen 
-{
-	inline::std::shared_ptr<GraphicsPipelineState> 
-		twen::GraphicsPipelineBuilder::Generate(Device& device, ::UINT nodeMask)
-	{
-		::ID3D12PipelineState* state{nullptr};
-		NodeMask = nodeMask ? nodeMask : device.AllVisibleNode();
-		device->CreateGraphicsPipelineState(this, IID_PPV_ARGS(&state));
-		
-		return {};
-	}
-}
 TWEN_EXPORT namespace twen
 {
 	class PipelineManager
-	{};
+	{
+	public:
+		// Start to build graphics pipeline state. 
+		// In debug: this method will check whether the root signature is empty.
+		[[nodiscard("No need to call Build on pipeline manager.")]]
+		inner::GraphicsPipelineBuilder Build(RootSignature* rso) const
+		{
+			MODEL_ASSERT(rso, "Root signature cannot be empty.");
+
+			return {rso}; 
+		}
+		// Create as graphics pipeline state.
+		[[nodiscard("No need to call Create on pipeline manager.")]]
+		GraphicsPipelineState* Create(Device& device, inner::GraphicsPipelineBuilder const& builder) 
+		{
+			::ID3D12PipelineState* state{nullptr};
+			device.Verify(
+				device->CreateGraphicsPipelineState(builder, IID_PPV_ARGS(&state))
+				);
+
+			return device.Create<GraphicsPipelineState>(builder, state);
+		}
+		// Create as compute pipeline state.
+		[[nodiscard("No need to call Create on pipeline manager.")]]
+		ComputePipelineState* Create(Device& device, ShaderNode* computeShader, RootSignature* rso, ::UINT nodeMask)
+		{
+			MODEL_ASSERT(rso, "Rso cannot be empty, Currently.");
+
+			D3D12_COMPUTE_PIPELINE_STATE_DESC desc
+			{ *rso, computeShader->Bytecode(), nodeMask, };
+
+			::ID3D12PipelineState* state{ nullptr };
+			device.Verify(
+				device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&state))
+			);
+			
+			return device.Create<ComputePipelineState>(nodeMask, state);
+		}
+	private:
+	};
 }

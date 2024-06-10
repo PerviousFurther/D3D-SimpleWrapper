@@ -184,9 +184,9 @@ inline auto& fnName(__VA_OPT__(BOTH_TWEN(__VA_ARGS__))){\
 			, m_OffsetFromStart{ builder.m_OffsetFromTableStart }
 		{
 			::D3D12_COMMAND_SIGNATURE_DESC desc{ Stride, CommandCount, builder.m_Arguments.data(), nodeMask };
-			device->CreateCommandSignature(&desc, rootSignature ? *rootSignature : nullptr, IID_PPV_ARGS(m_CommandSignature.Put()));
-
-			MODEL_ASSERT(m_CommandSignature, "Create command signature failure.");
+			device.Verify(
+				device->CreateCommandSignature(&desc, rootSignature ? *rootSignature : nullptr, IID_PPV_ARGS(m_CommandSignature.Put()))
+			);
 
 			m_RootSignature = rootSignature ? rootSignature : nullptr;
 		}

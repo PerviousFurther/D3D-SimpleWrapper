@@ -10,10 +10,10 @@ namespace twen
 
 	// Modify create query pointer on d3d12 heap.
 	class QueryHeap
-		: public inner::ShareObject<QueryHeap>
-		, public inner::DeviceChild
+		: public Residency::Resident
 		, public inner::MultiNodeObject
-		, public Residency::Resident
+		, public inner::ShareObject<QueryHeap>
+		, public inner::DeviceChild
 	{
 	public:
 
@@ -29,14 +29,16 @@ namespace twen
 
 		QueryHeap(Device& device, ::D3D12_QUERY_HEAP_TYPE type, ::UINT count, ::UINT visible = 0u)
 			: DeviceChild{ device }
-			, Resident{ resident::QueryHeap, count }
+			, Resident{ false, resident::QueryHeap, count }
 			, MultiNodeObject{ visible, device.NativeMask }
 			, Type{ type }
 		{
 			MODEL_ASSERT(count, "Query heap cannot be empty.");
 
 			::D3D12_QUERY_HEAP_DESC desc{ Type, count, VisibleMask };
-			device->CreateQueryHeap(&desc, IID_PPV_ARGS(&m_Handle));
+			device.Verify(
+				device->CreateQueryHeap(&desc, IID_PPV_ARGS(&m_Handle))
+			);
 
 			MODEL_ASSERT(m_Handle, "Failed to create query heap.");
 		}
@@ -72,6 +74,7 @@ namespace twen::inner
 			return { Backing, Offset + offset, size, nullptr, Type };
 		}
 	};
+
 }
 
 // Definition.
@@ -81,6 +84,6 @@ namespace twen
 
 	inline inner::Pointer<QueryHeap> twen::QueryHeap::Address()
 	{
-		return { weak_from_this(), 0u, Size, nullptr, ::D3D12_QUERY_TYPE_OCCLUSION, };
+		return { this, 0u, Size, nullptr, ::D3D12_QUERY_TYPE_OCCLUSION, };
 	}
 }

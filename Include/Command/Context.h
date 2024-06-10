@@ -6,7 +6,9 @@ namespace twen
 	{
 		Fence(Device& device, ::D3D12_FENCE_FLAGS flags = ::D3D12_FENCE_FLAG_NONE)
 		{
-			device->CreateFence(0u, flags, IID_PPV_ARGS(&m_Fence));
+			device.Verify(
+				device->CreateFence(0u, flags, IID_PPV_ARGS(&m_Fence))
+			);
 			MODEL_ASSERT(m_Fence, "Create fence failure.");
 		}
 
@@ -44,79 +46,14 @@ namespace twen
 		class ComputeCommandContext;
 		class CopyCommandContext;
 
+		// Types that the command context support currently.
 		TWEN_ISC::D3D12_COMMAND_LIST_TYPE Types[]
 		{
 			::D3D12_COMMAND_LIST_TYPE_DIRECT,
 			::D3D12_COMMAND_LIST_TYPE_COPY,
 			::D3D12_COMMAND_LIST_TYPE_COMPUTE,
 		};
-
-	public:
-
-		CommandContext(CommandContext const&) = delete;
-		CommandContext& operator=(CommandContext const&) = delete;
-		~CommandContext()
-		{
-			// discard allocators.
-			for (auto& [_,allocator] : m_Allocators) 
-			{
-				allocator->Release();
-			}
-			// discard payloads.
-			for (auto& [_, payloads] : m_Payloads) 
-			{
-				for (auto& payload : payloads) 
-				{
-					payload->Release();
-				}
-			}
-		}
-
-	public:
-
-		// We assume the giving function is can be invoked with command context.
-		template<typename Fn>
-		void ExecuteOnMain(/*Device* device, */Fn&& fn)
-			requires::std::invocable<Fn, CommandContext::DirectCommandContext*>;
-
-		// We assume the giving function is can be invoked with copy context.
-		// TODO: Judge from Fn's parameter type to decide Create which type of context.00+
-		template<typename Fn>
-		void ExecuteOnBatch(/*Device* device, */Fn&& fn) requires
-			::std::invocable<Fn, CommandContext::CopyCommandContext*> ||
-			::std::invocable<Fn, CommandContext::ComputeCommandContext*> ||
-			::std::invocable<Fn, CommandContext::DirectCommandContext*>;
-
-		void Commit();
-
 	private:
-		CommandContext(Device& device) 
-			: DeviceChild{device}
-		{
-			// TODO: ?
-			for (auto const& type : Types) 
-			{
-				device->CreateCommandAllocator(type, IID_PPV_ARGS(&m_Allocators[type]));
-				MODEL_ASSERT(m_Allocators[type], "Recorded failure.");
-			}
-		}
-	private:
-
-		template<typename T>
-		T* CreateNewContext(Device& device)
-		{
-			if (!GetDevice().m_ResidencyManager->Recording())
-				GetDevice().m_ResidencyManager->BeginRecordingResidentChanging();
-
-			command_list_type* cmdlist{nullptr};
-			auto hr = device->CreateCommandList(device.AllVisibleNode(), T::Type, m_Allocators.at(T::Type), nullptr, IID_PPV_ARGS(&cmdlist));
-
-			MODEL_ASSERT(SUCCEEDED(hr), "Create command list failure.");
-
-			MODEL_ASSERT(cmdlist, "Create command list failure.");
-			
-			return new T{ this, cmdlist, T::Type };
-		}
 
 		using payload_type = ::ID3D12CommandList*;
 		using states_type = ::std::vector<::D3D12_RESOURCE_STATES>;
@@ -134,6 +71,60 @@ namespace twen
 
 		struct ContextCommon;
 
+	public:
+
+		CommandContext(CommandContext const&) = delete;
+		CommandContext& operator=(CommandContext const&) = delete;
+		~CommandContext();
+
+	public:
+
+		// We assume the giving function is can be invoked with command context.
+		template<typename Fn>
+		void ExecuteOnMain(/*Device* device, */Fn&& fn)
+			requires::std::invocable<Fn, CommandContext::DirectCommandContext*>;
+
+		// We assume the giving function is can be invoked with copy context.
+		template<typename Fn>
+		void ExecuteOnBatch(/*Device* device, */Fn&& fn) requires
+			::std::invocable<Fn, CommandContext::CopyCommandContext*> ||
+			::std::invocable<Fn, CommandContext::ComputeCommandContext*> ||
+			::std::invocable<Fn, CommandContext::DirectCommandContext*>;
+
+		void Commit();
+
+	private:
+		CommandContext(Device& device) 
+			: DeviceChild{device}
+		{
+			// TODO: ?
+			for (auto const& type : Types) 
+			{
+				device.Verify(
+					device->CreateCommandAllocator(type, IID_PPV_ARGS(&m_Allocators[type]))
+				);
+			}
+		}
+	private:
+		template<typename T>
+		T* CreateNewContext(Device& device)
+		{
+			if (!GetDevice().m_ResidencyManager->Recording())
+				GetDevice().m_ResidencyManager->BeginRecordingResidentChanging();
+
+			command_list_type* cmdlist{nullptr};
+			device.Verify(
+				device->CreateCommandList(device.AllVisibleNode(), T::Type, m_Allocators.at(T::Type), nullptr, IID_PPV_ARGS(&cmdlist))
+			);
+
+			MODEL_ASSERT(cmdlist, "Create command list failure.");
+			
+			return new T{ this, cmdlist, T::Type };
+		}
+
+		void Close(ContextCommon* common);
+
+	private:
 		::std::unordered_map<::D3D12_COMMAND_LIST_TYPE,
 			command_list_allocator*> m_Allocators;
 
@@ -158,6 +149,7 @@ namespace twen
 
 	struct CommandContext::ResourceStateTracker 
 	{
+		using state_t = ::D3D12_RESOURCE_STATES;
 		// TODO: Currently, we dont know when should the state update. 
 		//       If other thread also need to transition the state, what barrier should it access.
 		bool UpdateState(::D3D12_RESOURCE_STATES state, ::UINT subresourceIndex, ::std::vector<::D3D12_RESOURCE_BARRIER>& barriers)
@@ -174,18 +166,27 @@ namespace twen
 				if (oldState == state)
 					return false;
 
+				static_cast<void>(state == IdleState ? NumNotIdle-- : NumNotIdle++);
+
 				States.at(subresourceIndex) = state;
 
 				barriers.emplace_back(Utils::ResourceBarrier(*Resource, oldState, state, subresourceIndex));
-			} else for (auto index{ 0u }; auto& oldState : States) {
-			// Only emplace the state that is not same.
-				if (oldState != state)
-				{
-					barriers.emplace_back(Utils::ResourceBarrier(*Resource, oldState, state, index));
-					oldState = state;
-				}
+			} else {
+				if (state == IdleState) NumNotIdle = 0u;
+				else NumNotIdle = static_cast<::UINT>(States.size());
 
-				index++;
+				// TODO: find better way.
+				for (auto index{ 0u }; auto& oldState : States) 
+				// Only emplace the state that is not same.
+				{
+					if (oldState != state)
+					{
+						barriers.emplace_back(Utils::ResourceBarrier(*Resource, oldState, state, index));
+						oldState = state;
+					}
+
+					index++;
+				}
 			}
 			return true;
 		}
@@ -193,27 +194,24 @@ namespace twen
 		template<typename View, typename Ext>
 		ResourceStateTracker(::std::shared_ptr<Views::Bindable<View, Ext>> bindable) 
 			: Resource{ bindable->BackingResource() }
+			, IdleState{ inner::Transition<View>{}(ResourceCurrentStage::Idle) }
 		{
-			auto initState = inner::Transition<View>{}(ResourceCurrentStage::Idle);
-
 			if (bindable->IsTexture())
-				States.resize(bindable->ResourcePosition().NumSubresource, initState);
+				States.resize(bindable->ResourcePosition().NumSubresource, IdleState);
 			else
-				States.resize(1u, initState);
+				States.resize(1u, IdleState);
 		}
 
-		//ResourceStateTracker(ResourceStateTracker const&) = delete;
-		//ResourceStateTracker& operator=(ResourceStateTracker const&) = delete;
-
-		//ResourceStateTracker(ResourceStateTracker&&) = default;
-		//ResourceStateTracker& operator=(ResourceStateTracker&&) = default;
-
-		::std::mutex Mutex{};
-
-		Resource* Resource{nullptr};
-		::std::vector<::D3D12_RESOURCE_STATES> States{};
+		state_t IdleState  {};
+		::UINT  NumNotIdle {0u}; 
+		Resource* Resource {nullptr};
+		::std::mutex Mutex {};
+		::std::vector<state_t> States{};
 	};
-
+	//
+	//
+	//
+	//
 	template<typename Child>
 	struct CommandContext::BarrierContext
 	{
@@ -234,13 +232,14 @@ namespace twen
 		bool Transition(shared_view<View, Ext> view, ::D3D12_RESOURCE_STATES newState) noexcept
 		{
 			CommandContext* context = static_cast<const Child*>(this)->ParentContext();
+			auto resource = view->BackingResource();
 
 			// TODO: do check.
 
-			if (!context->m_States.contains(view->BackingResource()))
-				context->m_States.emplace(view->BackingResource(), new ResourceStateTracker{view});
+			if (!context->m_States.contains(resource))
+				context->m_States.emplace(resource, new ResourceStateTracker{view});
 
-			return context->m_States.at(view->BackingResource())->UpdateState(newState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, m_Barriers);
+			return context->m_States.at(resource)->UpdateState(newState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, m_Barriers);
 		}
 		template<typename View, typename Ext>
 		bool Transition(shared_view<View, Ext> view, ::D3D12_RESOURCE_STATES before, ::D3D12_RESOURCE_STATES newState) noexcept
@@ -248,15 +247,17 @@ namespace twen
 			CommandContext* context = static_cast<const Child*>(this)->ParentContext();
 
 			// TODO: do check.
+			auto resource{ view->BackingResource() };
 
-			if (!context->m_States.contains(view->BackingResource()))
-				context->m_States.emplace(view->BackingResource(), new ResourceStateTracker{ view });
+			if (!context->m_States.contains(resource))
+				context->m_States.emplace(resource, new ResourceStateTracker{ view });
 
-			return context->m_States.at(view->BackingResource())->UpdateState(newState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, m_Barriers);
+			return context->m_States.at(resource)->UpdateState(newState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, m_Barriers);
 		}
 		// Clean up all storaged barrier.
 		void FlushBarriers() 
 		{ 
+			MODEL_ASSERT(m_Barriers.size(), "No need to call FlushBarrier().");
 			static_cast<Child*>(this)->m_CommandList->ResourceBarrier(static_cast<::UINT>(m_Barriers.size()), m_Barriers.data());
 			m_Barriers.clear();
 		}
@@ -284,8 +285,8 @@ namespace twen
 		template<typename View, typename Ext>
 		using shared_view = ::std::shared_ptr<Views::Bindable<View, Ext>>;
 
-		using root_signature = ::std::shared_ptr<RootSignature>;
-		using pipeline_state = ::std::shared_ptr<Pipeline>;
+		using root_signature = RootSignature*;
+		using pipeline_state = Pipeline*;
 
 		void BindDescriptorHeap() 
 		{
@@ -298,8 +299,9 @@ namespace twen
 		{
 			if (pointer.Vaild()) 
 				pointer.Fallback();
+
 			pointer.Size = num;
-			pointer.Backing.reset();
+			pointer.Backing = nullptr;
 
 			DescriptorManager* descriptorManager = static_cast<Child*>(this)
 				->ParentContext()->GetDevice().DescriptorManager();
@@ -425,8 +427,8 @@ namespace twen
 		}
 		// TODO: bindless...
 
-		::std::shared_ptr<Pipeline> m_Pipeline{};
-		::std::shared_ptr<RootSignature> m_RootSignature{};
+		Pipeline* m_Pipeline{};
+		RootSignature* m_RootSignature{};
 
 		// [Root, pointer]
 		// Allocation of descriptor heap.
@@ -629,7 +631,7 @@ namespace twen
 			m_CommandList->SetGraphicsRootSignature(*rootSignature);
 		}
 		// Setting legacy pipeline state.
-		void Pipeline(::std::shared_ptr<GraphicsPipelineState> state) 
+		void Pipeline(GraphicsPipelineState* state) 
 		{
 			BindableContext::m_Pipeline = state;
 			m_CommandList->SetPipelineState(*state);
@@ -812,7 +814,7 @@ namespace twen
 		using ContextCommon::ContextCommon;
 		using CopyContext::Copy;
 		using BarrierContext::Transition;
-
+		using BarrierContext::FlushBarriers;
 	};
 	// General copy command context.
 	using CopyCommandContext = CommandContext::CopyCommandContext;
@@ -820,13 +822,18 @@ namespace twen
 	// Do not use currently.
 	class CommandContext::ComputeCommandContext 
 		: public ContextCommon
+		, CopyContext<ComputeCommandContext> 
+		, BarrierContext<ComputeCommandContext>
 		, BindableContext<ComputeCommandContext>
 	{
 		friend class CommandContext;
 	public:
 		TWEN_ISCA Type{ ::D3D12_COMMAND_LIST_TYPE_COMPUTE };
 
+		using ContextCommon::ContextCommon;
 		using BindableContext::Bind;
+		using BarrierContext::Transition;
+		using BarrierContext::FlushBarriers;
 
 	private:
 
@@ -841,15 +848,11 @@ namespace twen
 	inline void CommandContext::ExecuteOnMain(/*Device* device,*/ Fn&& fn)
 		requires::std::invocable<Fn, CommandContext::DirectCommandContext*>
 	{
-
 		auto context = CreateNewContext<DirectCommandContext>(GetDevice());
 
 		fn(context);
 
-		static_cast<ContextCommon*>(context)->m_CommandList->Close();
-
-		m_ActiveContexts.emplace_back(context);
-		m_Payloads[DirectCommandContext::Type].emplace_back(static_cast<ContextCommon*>(context)->m_CommandList);
+		Close(context);
 	}
 
 	template<typename Fn>
@@ -879,12 +882,30 @@ namespace twen
 			commonContext = context;
 		}
 
-		commonContext->m_CommandList->Close();
-
-		m_ActiveContexts.emplace_back(commonContext);
-		m_Payloads[CopyCommandContext::Type].emplace_back(commonContext->m_CommandList);
+		Close(commonContext);
 	}
 
+	inline CommandContext::~CommandContext()
+	{
+		// discard allocators.
+		for (auto& [_, allocator] : m_Allocators)
+		{
+			allocator->Release();
+		}
+		// discard payloads.
+		for (auto& [_, payloads] : m_Payloads)
+		{
+			for (auto& payload : payloads)
+			{
+				payload->Release();
+			}
+		}
+		// dispose all state tracker.
+		for (auto&& [resource, tracker] : m_States)
+			delete tracker;
+	}
+
+	// For single thread is ok.
 	inline void CommandContext::Commit()
 	{
 		GetDevice().m_ResidencyManager->StorageResident();
@@ -894,9 +915,7 @@ namespace twen
 			auto queue{ GetDevice().Queue(type) };
 			queue->AddPayloads(::std::move(state));
 			if (FAILED(queue->Wait(queue->Execute()))) 
-			{
 				MODEL_ASSERT(false, "Wait failure.");
-			}
 			m_Allocators.at(type)->Reset();
 		}
 
@@ -914,21 +933,43 @@ namespace twen
 				delete static_cast<CopyCommandContext*>(activeContext);
 				break;
 			case D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE:
+				// Reserved.
+				delete activeContext;
 				break;
 			case D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS:
+				// Reserved.
+				delete activeContext;
 				break;
 			case D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE:
-			default: delete activeContext; break;
+				// Reserved.
+				delete activeContext;
+				break;
+			default:MODEL_ASSERT(false, "Unknown type.");
+				break;
 			}
 		}
 		m_ActiveContexts.clear();
 
 		m_Payloads.clear();
-		if(m_States.size())
-			for (auto& [state, tracker] : m_States)
-			{
-				delete tracker;
-			}
-		m_States.clear();
+		if (m_States.size())
+			::std::erase_if(m_States, 
+				[](auto const& pair) 
+				{
+					if (!pair.second->NumNotIdle)
+					{
+						delete pair.second;
+						return true;
+					} else 
+						return false;
+				});
+	}
+
+	inline void CommandContext::Close(ContextCommon* common)
+	{
+		auto hr{ common->m_CommandList->Close() };
+		MODEL_ASSERT(SUCCEEDED(hr), "Close command list failure.");
+
+		m_ActiveContexts.emplace_back(common);
+		m_Payloads[common->Type].emplace_back(common->m_CommandList);
 	}
 }

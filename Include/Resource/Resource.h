@@ -35,10 +35,10 @@ namespace twen
 	// Resource would not actually create d3d12 resource. 
 	// Use Resource::Create<[Placed/Reserved/Committed]Resource> to generate d3d12 resource.
 	class Resource 
-		: public inner::ShareObject<Resource>
-		, inner::DeviceChild
+		: public Residency::Resident
 		, public inner::MultiNodeObject
-		, public Residency::Resident
+		, public inner::ShareObject<Resource>
+		, inner::DeviceChild
 	{
 	public:
 
@@ -58,7 +58,7 @@ namespace twen
 	protected:
 
 		Resource(Device& device, ::D3D12_RESOURCE_DESC const& desc, sort_t type, ::UINT visibleMask, bool isInitEvict)
-			: Resident{ resident::Resource, 0u, isInitEvict }
+			: Resident{ isInitEvict, resident::Resource, 0u }
 			, DeviceChild{ device }
 			, MultiNodeObject{ visibleMask, device.NativeMask }
 			, Type{ type }
@@ -184,7 +184,7 @@ namespace twen::inner
 	template<>
 	struct inner::Pointer<Resource>
 	{
-		::std::weak_ptr<Resource> Backing;
+		Resource* Backing;
 
 		::D3D12_GPU_VIRTUAL_ADDRESS Address;
 
@@ -217,7 +217,7 @@ namespace twen::inner
 			if (AllocateFrom)
 				AllocateFrom->Free(*this);
 			else if (StandAlone())
-				Backing.lock()->Evict();
+				Backing->Evict();
 			else
 				MODEL_ASSERT(false, "Neither the pointer is allocated nor represent resource itself.");
 		}
@@ -257,24 +257,22 @@ namespace twen::inner
 		bool StandAlone() const
 		{
 			if (Address) 
-			{
-				MODEL_ASSERT(!Backing.expired(), "Cannot delete on dead resource.");
-				return Backing.lock()->Size == Size;
-			}
+				return Backing->Size == Size;
 			else
-				return Backing.lock()->Footprints().size() == NumSubresource;
+				return Backing->Footprints().size() == NumSubresource;
 		}
 
-		::D3D12_GPU_VIRTUAL_ADDRESS operator*() const { MODEL_ASSERT(Address, "Not allow dereference an texture pointer to get virtual address."); return Address; }
-
-		operator bool() const { return Backing.use_count(); }
-
+		::D3D12_GPU_VIRTUAL_ADDRESS operator*() const 
+		{ 
+			MODEL_ASSERT(Address, "Not allow dereference an texture pointer to get virtual address."); 
+			return Address; 
+		}
 	};
 
 	template<>
 	inline bool operator==<Resource>(inner::Pointer<Resource> const& left, inner::Pointer<Resource> const& right)
 	{
-		return left.Backing.lock().get() == right.Backing.lock().get() &&
+		return left.Backing == right.Backing &&
 			// verify resource position.
 			(right.Address == left.Address
 				? left.Address
@@ -290,11 +288,39 @@ namespace twen::inner
 
 namespace twen 
 {
+	template<>
+	inline auto Residency::DeleteResident<Resource>(Residency::Resident* resident)
+	{
+		MODEL_ASSERT(resident->ResidentType == Residency::Resident::resident::Resource, "Not an resource.");
+
+		auto resource = reinterpret_cast<Resource*>(resident);
+		switch (resource->Type)
+		{
+		case Resource::Committed:
+			static_cast<CommittedResource*>(resource)->~CommittedResource();
+			return sizeof(CommittedResource);
+		case Resource::Placed:
+			static_cast<PlacedResource*>(resource)->~PlacedResource();
+			return sizeof(PlacedResource);
+		case Resource::Reserved:
+			MODEL_ASSERT(false, "Not implemented.");
+			//delete static_cast<ReservedResource*>(resource);
+			return sizeof(ReservedResource);
+		}
+	}
+
 	// resource.
 
 	inline PlacedResource::PlacedResource(Device& device, ::twen::inner::Pointer<Heap> const& address, 
 		::D3D12_RESOURCE_DESC const& desc, ::D3D12_RESOURCE_STATES initState, ::D3D12_CLEAR_VALUE const& optimizeValue)
-		: Resource{device, desc, Placed, address.Backing.lock()->VisibleMask, address.Backing.lock()->Evicted }
+		: Resource
+		{
+		  device
+		, desc
+		, Placed
+		, address.Backing->VisibleMask
+		, address.Backing->Evicted
+		}
 		, BackingPosition{address}
 	{
 	#if D3D12_MODEL_DEBUG
@@ -307,12 +333,14 @@ namespace twen
 			"Deny shader resource can only use with depth stencil.");
 	#endif // 
 
-		device->CreatePlacedResource(
+		device.Verify(
+			device->CreatePlacedResource(
 			*BackingPosition, 
 			BackingPosition.Offset,
 			&desc, initState, 
 			optimizeValue.Format==::DXGI_FORMAT_UNKNOWN ? nullptr : &optimizeValue
-			, IID_PPV_ARGS(&m_Handle));
+			, IID_PPV_ARGS(&m_Handle))
+		);
 
 		MODEL_ASSERT(m_Handle, "Create placed resource failure.");
 	#if D3D12_MODEL_DEBUG
@@ -323,7 +351,14 @@ namespace twen
 
 	inline CommittedResource::CommittedResource(Device& device, ::D3D12_HEAP_TYPE type, ::D3D12_RESOURCE_DESC const& desc,
 		::D3D12_RESOURCE_STATES initState, ::UINT visible, ::D3D12_HEAP_FLAGS heapFlags, ::D3D12_CLEAR_VALUE const& optimizeValue)
-		: Resource{ device, desc, Committed, visible, static_cast<bool>(heapFlags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT) }
+		: Resource
+		{ 
+		  device
+		, desc
+		, Committed
+		, visible
+		, static_cast<bool>(heapFlags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT) 
+		}
 	{
 		MODEL_ASSERT(type != ::D3D12_HEAP_TYPE_CUSTOM, "This constructor is not allow custom heap.");
 
@@ -340,14 +375,16 @@ namespace twen
 		, VisibleMask 
 		};
 
-		device->CreateCommittedResource(
+		device.Verify(
+			device->CreateCommittedResource(
 			&heapProps, 
 			// Committed resource cannot set these flags.
 			heapFlags & ~(::D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES | ::D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES), 
 			&desc, 
 			initState,
 			optimizeValue.Format == ::DXGI_FORMAT_UNKNOWN ? nullptr : &optimizeValue,
-			IID_PPV_ARGS(&m_Handle));
+			IID_PPV_ARGS(&m_Handle))
+		);
 		MODEL_ASSERT(m_Handle, "Create resource failure.");
 	#if D3D12_MODEL_DEBUG
 		m_DebugName = std::format(L"Resource_{}{}", Debug::Name(), ID);
@@ -367,7 +404,7 @@ namespace twen
 		MODEL_ASSERT(Desc.Dimension == ::D3D12_RESOURCE_DIMENSION_BUFFER, "Texture cannot get address.");
 		return
 		{
-			share::shared_from_this(),
+			this,
 			BaseAddress(),
 			Size, 0u,
 		};
@@ -381,7 +418,7 @@ namespace twen
 		
 		return
 		{
-			.Backing{ shared_from_this() },
+			.Backing{ this },
 			.Address{ 0u },
 			.SubresourceIndex{ index },
 			.NumSubresource{ count },
@@ -428,7 +465,9 @@ namespace twen
 		this->GetDevice().UpdateResidency(this);
 
 		if (Type == Placed)
-			this->GetDevice().UpdateResidency(static_cast<const PlacedResource*>(this)->BackingPosition.Backing.lock().get());
+			this->GetDevice().UpdateResidency(
+				static_cast<const PlacedResource*>(this)->BackingPosition.Backing
+			);
 
 		return m_Handle;
 	}

@@ -4,10 +4,10 @@
 namespace twen
 {
 	class DescriptorHeap 
-		: public inner::ShareObject<DescriptorHeap>
-		, public inner::DeviceChild
+		: public Residency::Resident
 		, public inner::MultiNodeObject
-		, public Residency::Resident
+		//, public inner::ShareObject<DescriptorHeap>
+		, public inner::DeviceChild
 	{
 	public:
 
@@ -27,16 +27,16 @@ namespace twen
 			::UINT visible = 0u)
 			: DeviceChild{ device }
 			, MultiNodeObject{ visible, device.NativeMask }
-			, Resident{ resident::DescriptorHeap, numDescriptor * device->GetDescriptorHandleIncrementSize(type), }
+			, Resident{ false, resident::DescriptorHeap, numDescriptor * device->GetDescriptorHandleIncrementSize(type), }
 			, Type{ type }
 			, Size{ numDescriptor }
 			, Stride{ device->GetDescriptorHandleIncrementSize(type) }
 			, ShaderVisible( flags &::D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE )
 		{
 			::D3D12_DESCRIPTOR_HEAP_DESC desc{ type, numDescriptor, flags, VisibleMask };
-			device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_Handle));
-
-			MODEL_ASSERT(m_Handle, "Create descriptor heap failure.");
+			device.Verify(
+				device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_Handle))
+			);
 		}
 
 		DescriptorHeap(DescriptorHeap const&) = delete;
@@ -110,7 +110,7 @@ namespace twen::inner
 			if (AllocateFrom)
 				AllocateFrom->Free(*this);
 			else if (StandAlone())
-				Backing.lock()->Evict();
+				Backing->Evict();
 		}
 
 		inline inner::Pointer<DescriptorHeap> Subrange(::UINT64 offset, ::UINT64 size) const
@@ -155,13 +155,14 @@ namespace twen::inner
 
 		// Not recommand to call this method.
 		// Not recommand to call this method.
-		bool StandAlone() const { return Backing.lock()->Size == Size; }
+		bool StandAlone() const { return Backing->Size == Size; }
 
 		friend bool operator==(inner::Pointer<DescriptorHeap> const& left, inner::Pointer<DescriptorHeap> const& right)
 		{
 			return left.Offset == right.Offset && left.Size == right.Size;
 		}
 	};
+
 }
 
 namespace twen 
@@ -171,7 +172,7 @@ namespace twen
 	{
 		return
 		{
-			share::weak_from_this(),
+			this,
 			0u,
 			this->Size,
 			nullptr,

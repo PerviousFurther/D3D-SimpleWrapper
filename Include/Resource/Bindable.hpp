@@ -28,7 +28,11 @@ namespace twen::Views
 		template<typename View>
 		::std::shared_ptr<View> As();
 
-		::twen::Resource* BackingResource() const { MODEL_ASSERT(CanBind(), "try obtain invaild resource."); return m_Position.Backing.lock().get(); }
+		::twen::Resource* BackingResource() const 
+		{ 
+			MODEL_ASSERT(CanBind(), "try obtain invaild resource."); 
+			return m_Position.Backing; 
+		}
 
 		inner::Pointer<::twen::Resource> const& ResourcePosition() const { return m_Position; }
 
@@ -42,7 +46,8 @@ namespace twen::Views
 
 			return m_Position.Address;
 		}
-		operator::ID3D12Resource* () const { return *m_Position.Backing.lock(); }
+
+		operator::ID3D12Resource* () const { return *m_Position.Backing; }
 
 	public:
 	#if D3D12_MODEL_DEBUG
@@ -431,11 +436,13 @@ namespace twen
 		using bindable = Views::Bindable<RenderTargetView>;
 		using shared_bindable = ::std::shared_ptr<bindable>;
 
+		// object render target.
 		void operator()(shared_bindable view, ::D3D12_CPU_DESCRIPTOR_HANDLE handle) const
 		{
-			view->GetDevicePointer()->CreateRenderTargetView(*view, &view->View(), handle);
+			auto const& viewDesc = view->View();
+			view->GetDevicePointer()->CreateRenderTargetView(*view, &viewDesc, handle);
 		}
-
+		// null render target.
 		void operator()(Device& device, ::D3D12_CPU_DESCRIPTOR_HANDLE handle) const
 		{
 			static constexpr::D3D12_RENDER_TARGET_VIEW_DESC desc{};
@@ -747,7 +754,7 @@ TWEN_EXPORT namespace twen
 
 
 			ShaderResourceView::view_t& view = self->View();
-			view.Format = position.Backing.lock()->Desc.Format;
+			view.Format = position.Backing->Desc.Format;
 			view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
 			if (position.NumSubresource > 6u) { // is texture cube.
@@ -866,12 +873,13 @@ namespace twen
 		}
 	};
 
+	// TODO: Write state cannot combine with other write state.
 	template<>
 	struct::twen::inner::Transition<UnorderedAccessView>
 	{
-		TWEN_ISCA WriteState { ::D3D12_RESOURCE_STATE_UNORDERED_ACCESS | ::D3D12_RESOURCE_STATE_COPY_SOURCE };
+		TWEN_ISCA WriteState { ::D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
 		TWEN_ISCA ReadState  { ::D3D12_RESOURCE_STATE_COMMON };
-		TWEN_ISCA CopyState  { ::D3D12_RESOURCE_STATE_COMMON };
+		TWEN_ISCA CopyState  { ::D3D12_RESOURCE_STATE_COPY_SOURCE };
 
 		inline constexpr::D3D12_RESOURCE_STATES operator()(ResourceCurrentStage stage) const
 		{
@@ -904,7 +912,7 @@ namespace twen
 	struct Countered
 	{
 	public:
-		::ID3D12Resource* Counter() const { return *m_Counter.Backing.lock(); }
+		::ID3D12Resource* Counter() const { return *m_Counter.Backing; }
 	protected:
 		void SetCounter(inner::Pointer<Resource> const& counter)
 		{
@@ -925,10 +933,6 @@ TWEN_EXPORT namespace twen
 	using RwTexture = Views::Bindable<UnorderedAccessView>;
 
 }
-
-
-
-
 
 
 namespace twen

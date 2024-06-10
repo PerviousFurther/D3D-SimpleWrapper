@@ -217,29 +217,33 @@ namespace twen
 		operator::ID3D12Device* () const { return m_Device; }
 
 		// Temporary, will be remove at soon.
-		template<typename T, typename...Args>
+		template<inner::congener<Residency::Resident> T, typename...Args>
 		inline auto Create(Args&&...args)
 			noexcept(::std::is_nothrow_constructible_v<T, Args...> || ::std::is_nothrow_constructible_v<T, Device&, Args...>) requires
 		    ::std::constructible_from<T, Device&, Args...> // Must be constructable from args. 
-			||::std::constructible_from<T, Args...>
+		{ return m_ResidencyManager->NewResident<T>(*this, ::std::forward<Args>(args)...); }
+
+		void Verify(HRESULT hr) 
 		{
-			if constexpr (inner::congener<T, Residency::Resident>) 
+			switch (hr)
 			{
-				auto resident = ::std::make_shared<T>(*this, ::std::forward<Args>(args)...);
-				m_ResidencyManager->AddResident(resident); // temporary.
-				return resident;
-			}
-			else if constexpr (requires(T r) { r.shared_from_this(); })
+			case S_OK:
+				break;
+			case DXGI_ERROR_DEVICE_REMOVED:
 			{
-				if constexpr (::std::constructible_from<T, Device&, Args...>)
-					return::std::make_shared<T>(*this, ::std::forward<Args>(args)...);
-				else
-					return::std::make_shared<T>(::std::forward<Args>(args)...);
-			} else {
-				if constexpr (::std::constructible_from<T, Device&, Args...>)
-					return::std::make_unique<T>(*this, ::std::forward<Args>(args)...);
-				else
-					return::std::make_unique<T>(::std::forward<Args>(args)...);
+				::D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumb{};
+				m_DeviceRemoveData->GetAutoBreadcrumbsOutput(&breadcrumb);
+				::D3D12_DRED_PAGE_FAULT_OUTPUT pageFault{};
+				m_DeviceRemoveData->GetPageFaultAllocationOutput(&pageFault);
+
+				MODEL_ASSERT(false, "Device was remove.");
+			}break;
+			case DXGI_ERROR_DEVICE_HUNG:
+				break;
+			case DXGI_ERROR_DEVICE_RESET:
+				break;
+			default:MODEL_ASSERT(false, "Error occured.");
+				break;
 			}
 		}
 	private:

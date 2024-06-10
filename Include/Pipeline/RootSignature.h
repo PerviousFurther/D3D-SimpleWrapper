@@ -288,7 +288,7 @@ namespace twen
 			};
 		}
 
-		::std::shared_ptr<RootSignature> Create(Device& device, ::D3D12_ROOT_SIGNATURE_FLAGS flags);
+		::std::shared_ptr<RootSignature> Create(Device& device, ::UINT nodeMask, ::D3D12_ROOT_SIGNATURE_FLAGS flags =::D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
 		template<typename...Args>
 		friend::std::shared_ptr<RootSignature> 
@@ -410,7 +410,7 @@ namespace twen
 		, m_RootsAllocationInfo{builder.m_RootAllocationInfo}
 	{}
 
-	inline::std::shared_ptr<RootSignature> RootSignatureBuilder::Create(Device& device, ::D3D12_ROOT_SIGNATURE_FLAGS flags =::D3D12_ROOT_SIGNATURE_FLAG_NONE)
+	inline::std::shared_ptr<RootSignature> RootSignatureBuilder::Create(Device& device, ::UINT nodeMask, ::D3D12_ROOT_SIGNATURE_FLAGS flags)
 	{
 		auto desc = GetDesc(flags);
 
@@ -418,7 +418,9 @@ namespace twen
 		::ID3DBlob* blob{nullptr}, *error{ nullptr};
 		if (SUCCEEDED(::D3D12SerializeVersionedRootSignature(&desc, &blob, &error)))
 		{
-			device->CreateRootSignature(device.NativeMask, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rso));
+			device.Verify(
+				device->CreateRootSignature(nodeMask ? nodeMask : device.AllVisibleNode(), blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rso))
+			);
 			if (!rso) 
 			{
 				if (blob) 
@@ -445,4 +447,9 @@ namespace twen
 		return::std::make_shared<RootSignature>(rso, blob, *this, flags);
 	}
 
+}
+
+namespace twen 
+{
+		
 }

@@ -16,6 +16,10 @@
 #include "Command\Query.h"
 #include "Command\Context.h"
 
+namespace twen::inner::global 
+{
+	Heap ModelHeap{};
+}
 
 namespace twen::Debug 
 {
@@ -33,7 +37,7 @@ namespace twen::Debug
 
 namespace twen::Residency
 {
-	::ID3D12Pageable* Resident::Pageable() const
+	::ID3D12Pageable* Resident::Pageable() const noexcept
 	{
 		switch (ResidentType)
 		{
@@ -133,12 +137,11 @@ namespace twen
 		, m_Allocator{ new ::twen::ResourceAllocator{*this, 1024u * 1024u, 65536u, 2u, ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT} }
 		, m_Context{ new CommandContext{ *this } }
 	{
+		MODEL_ASSERT(m_ResidencyManager, "Residency manager is not generated.");
 		device->AddRef();
 
 		MODEL_ASSERT(m_InfoQueue, "Not support info queue.");
 		MODEL_ASSERT(m_DeviceRemoveData, "Not support device remove data.");
-
-		::QueryPerformanceCounter(&m_ResidencyManager->m_InitTimeStamp);
 
 		InitializeDeviceContext();
 	}
@@ -160,11 +163,11 @@ namespace twen
 	void Device::InitializeDeviceContext()
 	{
 		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_DIRECT,
-			Create<class Queue>(::D3D12_COMMAND_LIST_TYPE_DIRECT, AllVisibleNode()));
+			::std::make_shared<class Queue>(*this, ::D3D12_COMMAND_LIST_TYPE_DIRECT, AllVisibleNode()));
 		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_COPY,
-			Create<class Queue>(::D3D12_COMMAND_LIST_TYPE_COPY, AllVisibleNode()));
+			::std::make_shared<class Queue>(*this, ::D3D12_COMMAND_LIST_TYPE_COPY, AllVisibleNode()));
 		m_MainQueues.emplace(::D3D12_COMMAND_LIST_TYPE_COMPUTE,
-			Create<class Queue>(::D3D12_COMMAND_LIST_TYPE_COMPUTE, AllVisibleNode()));
+			::std::make_shared<class Queue>(*this, ::D3D12_COMMAND_LIST_TYPE_COMPUTE, AllVisibleNode()));
 	}
 
 	void Device::UpdateResidency(const Residency::Resident* resident)
@@ -227,10 +230,14 @@ namespace twen
 		: inner::DeviceChild{device}, Type{type}
 	{
 		::D3D12_COMMAND_QUEUE_DESC desc{ type, priority, flags, nodeMask };
-		device->CreateCommandQueue(&desc, IID_PPV_ARGS(m_Handle.Put()));
+		device.Verify(
+			device->CreateCommandQueue(&desc, IID_PPV_ARGS(m_Handle.Put()))
+		);
 		assert(m_Handle && "Creating queue failure.");
 
-		device->CreateFence(0ull, ::D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_Fence.Put()));
+		device.Verify(
+			device->CreateFence(0ull, ::D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_Fence.Put()))
+		);
 		assert(m_Fence && "Creating fence failure.");
 	}
 

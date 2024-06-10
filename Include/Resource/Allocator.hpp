@@ -27,7 +27,7 @@ namespace twen::inner
 
 	protected:
 
-		Allocator(AllocatorType type, ::std::shared_ptr<R> backingRes) 
+		Allocator(AllocatorType type, R* backingRes) 
 			: Type{type}
 		#if D3D12_MODEL_DEBUG
 			, Size{backingRes->Size}
@@ -37,7 +37,7 @@ namespace twen::inner
 		{}
 
 		Allocator(AllocatorType type, inner::Pointer<R> position)
-			: Allocator<void>{ position.Backing.lock()->ResidentType }
+			: Allocator<void>{ position.Backing->ResidentType }
 		#if D3D12_MODEL_DEBUG
 			, Size{ position.Size }
 		#endif
@@ -69,7 +69,7 @@ namespace twen::inner
 
 		inner::Pointer<R> const& Location()	  const { return m_Backing; }
 
-		::std::shared_ptr<R> Resource() const { return m_Backing.Backing.lock(); }
+		R* Resource() const { return m_Backing.Backing; }
 
 		auto Alloc(::UINT64 size);
 		void Free(inner::Pointer<R> const& pointer);
@@ -109,7 +109,7 @@ namespace twen::inner
 	public:
 
 		// Full allocate.
-		BuddyAllocator(::std::shared_ptr<Backing> res, ::UINT64 alignment)
+		BuddyAllocator(Backing* res, ::UINT64 alignment)
 			: Allocator<Backing>{ Type, res }
 			, m_AlignmentOrder{ 63u - ::std::countl_zero(alignment) }
 		{ 
@@ -118,7 +118,7 @@ namespace twen::inner
 		}
 
 		// Full allocate.
-		BuddyAllocator(::std::shared_ptr<Backing> res)
+		BuddyAllocator(Backing* res)
 			: Allocator<Backing>{ Type, res }
 			, m_AlignmentOrder{ sizeof(res->Desc.Alignment) * CHAR_BIT - ::std::countl_zero(res->Desc.Alignment) - 1u }
 		{ UpdateSize(res->Size); }
@@ -235,7 +235,7 @@ namespace twen::inner
 
 	public:
 
-		DemandAllocator(::std::shared_ptr<Backing> res)
+		DemandAllocator(Backing* res)
 			: Allocator<Backing>{ Type, res }
 		{ UpdateSize(res->Size, res->Alignment); }
 
@@ -364,7 +364,7 @@ namespace twen::inner
 
 	public:
 
-		SegmentAllocator(::std::shared_ptr<Backing> res, ::UINT chunkSize) 
+		SegmentAllocator(Backing* res, ::UINT chunkSize) 
 			: Allocator<Backing>{ AllocatorType::Segment, res }
 			, ChunkSize{ chunkSize }
 		{ UpdateSize(res->Size);}

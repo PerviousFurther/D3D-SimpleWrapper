@@ -777,7 +777,7 @@ namespace twen::inner
 	template<typename R>
 	struct PointerBase 
 	{
-		::std::weak_ptr<R> Backing;
+		R* Backing{nullptr};
 
 		::UINT64 Offset;
 		::UINT64 Size;
@@ -789,12 +789,12 @@ namespace twen::inner
 			if (AllocateFrom)
 				AllocateFrom->Free(static_cast<Pointer<R>>(*this));
 			else if (StandAlone())
-				Backing.lock()->Evict();
+				Backing->Evict();
 			else
 				MODEL_ASSERT(false, "Neither the pointer was allocated nor represented an resource.");
 		}
 
-		bool StandAlone() const { return Backing.lock()->Size == Size; }
+		bool StandAlone() const { return Backing->Size == Size; }
 	};
 
 	template<typename R>
@@ -813,10 +813,11 @@ namespace twen::inner
 		|| ::std::is_same_v<Derived, Child>;
 
 	template<typename T>
-	struct ShareObject : public::std::enable_shared_from_this<T>
+	struct DECLSPEC_EMPTY_BASES ShareObject : ::std::enable_shared_from_this<T>
 	{
 		using share = ::std::enable_shared_from_this<T>;
 	};
+
 }
  
 
@@ -1047,6 +1048,105 @@ namespace twen
 
 namespace twen::Debug 
 {
-	::std::wstring_view Name();
-	void Name(::std::wstring_view name);
+	extern::std::wstring_view Name();
+	extern void Name(::std::wstring_view name);
+}
+
+
+// Maybe not use.
+namespace twen::inner::global
+{
+	struct Heap
+	{
+		enum Properities : ::DWORD
+		{
+			None,
+			NoSerialize = HEAP_NO_SERIALIZE,
+			EnableLFH = 2, // Cannot set with no serialize. and no need to manual set.
+			EnableZeroMemory = HEAP_NO_SERIALIZE
+		};
+
+		using info_class = ::HEAP_INFORMATION_CLASS;
+
+	public:
+		template<info_class info_class>
+		struct info_class_map { using type = ::std::nullptr_t; };
+
+		struct lock_guard
+		{
+			lock_guard(::HANDLE handle) : handle{ handle } { ::HeapLock(handle); }
+			~lock_guard() { ::HeapUnlock(handle); }
+
+			::HANDLE handle;
+		};
+
+	public:
+		Heap() noexcept(false) : handle{ ::HeapCreate(EnableZeroMemory, 0, 0) }
+		{
+			if (!handle) throw::std::exception{};
+			Infomation<HeapEnableTerminationOnCorruption>(nullptr);
+		}
+
+		~Heap() noexcept(false) { if (!::HeapDestroy(handle)) throw::std::exception{}; }
+
+	public:
+		::std::size_t Compact() const { return::HeapCompact(handle, NULL); }
+
+
+		template<info_class info_class, typename value_type = typename info_class_map<info_class>::type>
+		auto Information() const noexcept requires
+			(!::std::is_null_pointer_v<value_type>)
+		{
+			value_type result{};
+			::HeapQueryInformation(handle, info_class, &result, sizeof(value_type), nullptr);
+			return result;
+		}
+
+		template<info_class info_class,
+			typename value_type = typename info_class_map<info_class>::type>
+		void Infomation(value_type const& value = {}) const noexcept
+		{
+			if constexpr (!::std::is_null_pointer_v<value_type>)
+				::HeapSetInformation(handle, info_class, &value, sizeof(value_type));
+			else
+				::HeapSetInformation(handle, info_class, nullptr, 0u);
+
+		}
+
+		auto Summary() const noexcept
+		{
+			using summary_type = HEAP_SUMMARY;
+			summary_type value;
+			::HeapSummary(handle, NULL, &value);
+
+			return value;
+		}
+
+		bool Vaildate(void* pMem) const noexcept
+		{
+			return::HeapValidate(handle, NULL, pMem);
+		}
+
+		lock_guard LockScope() const noexcept { return { handle }; }
+
+		::BOOL Lock()   const noexcept { return::HeapLock(handle); }
+		::BOOL Unlock() const noexcept { return::HeapUnlock(handle); }
+
+		operator::HANDLE() const noexcept { return handle; }
+
+	private:
+		::HANDLE handle;
+	};
+	template<>
+	struct Heap::info_class_map<Heap::info_class::HeapOptimizeResources>
+	{
+		using type = ::HEAP_OPTIMIZE_RESOURCES_INFORMATION;
+	};
+	template<>
+	struct Heap::info_class_map<Heap::info_class::HeapCompatibilityInformation>
+	{
+		using type = Properities;
+	};
+
+	extern Heap ModelHeap;
 }

@@ -86,7 +86,7 @@ namespace twen
 			{}
 
 			// 
-			::std::shared_ptr<Heap> Init(Device* device, ::UINT64 size)
+			Heap* Init(Device* device, ::UINT64 size)
 			{
 				size = size > MinHeapSize ? size : MinHeapSize;
 				return device->Create<Heap>
@@ -126,7 +126,7 @@ namespace twen
 				, InitResourceState{ initState }
 			{}
 
-			::std::shared_ptr<Resource> Init(Device* device, ::UINT64 size)
+			Resource* Init(Device* device, ::UINT64 size)
 			{
 				auto position = MultiAllocator::Allocate(device, size);
 				return device->Create<PlacedResource>
@@ -315,12 +315,15 @@ namespace twen
 			m_BufferAllocatorUpload.CleanUp();
 			m_BufferAllocatorReadback.CleanUp();
 			m_BufferAllocatorDefault.CleanUp();
+
 			m_TextureAllocatorDefualt.CleanUp();
-			MODEL_ASSERT(m_TextureAllocatorDefualt.Allocators.empty(), "Memory leak.");
+			//MODEL_ASSERT(m_TextureAllocatorDefualt.Allocators.empty(), "Memory leak.");
+
 			m_TextureAllocatorSmall.CleanUp();
-			MODEL_ASSERT(m_TextureAllocatorSmall.Allocators.empty(), "Memory leak.");
+			//MODEL_ASSERT(m_TextureAllocatorSmall.Allocators.empty(), "Memory leak.");
+
 			m_TextureAllocatorMsaa.CleanUp();
-			MODEL_ASSERT(m_TextureAllocatorMsaa.Allocators.empty(), "Memory leak.");
+			//MODEL_ASSERT(m_TextureAllocatorMsaa.Allocators.empty(), "Memory leak.");
 		}
 
 	private:

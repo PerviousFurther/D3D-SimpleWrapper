@@ -19,10 +19,10 @@ namespace twen
 
 	// Should be noticed that when construct an heap. Expressing size will automatically align by alignemnt of <a>info</a>'s Alignment.
 	class Heap
-		: public inner::ShareObject<Heap>
-		, inner::DeviceChild
+		: public Residency::Resident
 		, public inner::MultiNodeObject
-		, public Residency::Resident
+		, public inner::ShareObject<Heap>
+		, inner::DeviceChild
 	{
 	public:
 
@@ -39,9 +39,9 @@ namespace twen
 		Heap(Device& device, sort_t type, ::UINT64 size, HeapExtraInfo const& info = {})
 			: Resident
 			{
-			  resident::Heap
+			  static_cast<bool>(info.Flags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT)
+			, resident::Heap
 			, 1ull << (63u - ::std::countl_zero(size) + static_cast<bool>((size & (size - 1u))))
-			, static_cast<bool>(info.Flags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT)
 			}
 			, DeviceChild{ device }
 			, MultiNodeObject{ info.VisibleNode, device.NativeMask }
@@ -67,8 +67,9 @@ namespace twen
 		{
 			MODEL_ASSERT(!(size % Desc.Alignment), "Size is not aligned.");
 
-			device->CreateHeap(&Desc, IID_PPV_ARGS(&m_Heap));
-			MODEL_ASSERT(m_Heap, "Create heap failure.");
+			device.Verify(
+				device->CreateHeap(&Desc, IID_PPV_ARGS(&m_Heap))
+			);
 
 		#if D3D12_MODEL_DEBUG
 			m_DebugName = std::format(L"Heap_{}{}", Debug::Name(), ID);
@@ -79,9 +80,9 @@ namespace twen
 		Heap(Device& device, ::UINT64 size, ::D3D12_CPU_PAGE_PROPERTY properity, D3D12_MEMORY_POOL memoryPool, HeapExtraInfo const& info = {})
 			: Resident
 			{
-			  resident::Heap
+			  static_cast<bool>(info.Flags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT)
+			, resident::Heap
 			, 1ull << (63u - ::std::countl_zero(size) + static_cast<bool>((size & (size - 1u))))
-			, static_cast<bool>(info.Flags & ::D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT)
 			}
 			, DeviceChild{ device }
 			, MultiNodeObject{ info.VisibleNode, device.NativeMask }
@@ -110,7 +111,9 @@ namespace twen
 			MODEL_ASSERT(!device.SwitchToAdapter()->Desc.NonLocalMemoryInfo.Budget, "Only uma can create custom heap.");
 			MODEL_ASSERT(!(size % Desc.Alignment), "Size is not aligned.");
 
-			device->CreateHeap(&Desc, IID_PPV_ARGS(&m_Heap));
+			device.Verify(
+				device->CreateHeap(&Desc, IID_PPV_ARGS(&m_Heap))
+			);
 			MODEL_ASSERT(m_Heap, "Create heap failure.");
 		}
 
@@ -158,7 +161,7 @@ namespace twen::inner
 
 		ID3D12Heap* operator*() const
 		{
-			return *Backing.lock();
+			return *Backing;
 		}
 
 		inline inner::Pointer<Heap> Subrange(::UINT64 offset, ::UINT64 size) const
@@ -181,7 +184,6 @@ namespace twen
 {
 	inline inner::Pointer<Heap> Heap::Address()
 	{
-		return{ share::weak_from_this(), 0u, Size, nullptr, Desc.Alignment, };
+		return{ this, 0u, Size, nullptr, Desc.Alignment, };
 	}
-
 }
